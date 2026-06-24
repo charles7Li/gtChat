@@ -1,6 +1,6 @@
 # gtChat Planner Workflow
 
-一个简单版 Planner-driven Multi-Agent Workflow，用规则驱动的 agent 管道完成小红书内容趋势分析、爆款模式提取、仿拍选题生成、方案评审和 Markdown 报告输出。
+一个基于 LangGraph 的 Planner-driven Multi-Agent Workflow，用 agent 管道完成小红书内容趋势分析、爆款模式提取、仿拍选题生成、方案评审和 Markdown 报告输出。
 
 第一版刻意保持轻量：不做复杂 Supervisor，不引入外部 memory 框架，不重构现有采集脚本。
 
@@ -33,7 +33,7 @@ app/
   memory/      # 轻量文件记忆
   schemas/     # 计划、分析、报告结构
   utils/       # 计数、时间、JSON 加载工具
-  workflow/    # 路由、节点式工作流、trace、evidence pack
+  workflow/    # LangGraph 编排、路由、trace、evidence pack
 docs/
   plan.md      # 原始实现方案
   upgrade_design.md
@@ -46,6 +46,7 @@ tests/
 安装测试依赖后运行：
 
 ```bash
+pip install langgraph
 python -m pytest tests -q
 ```
 

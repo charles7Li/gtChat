@@ -36,6 +36,20 @@ def structured_llm_call(
     base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     timeout = timeout_seconds or int(os.getenv("LLM_TIMEOUT_SECONDS", "60"))
     prompt = _load_prompt(prompt_name)
+    provider = os.getenv("LLM_PROVIDER", "openai-compatible").lower()
+
+    if provider == "langchain":
+        result = _call_langchain_chat_openai(
+            base_url=base_url,
+            api_key=api_key,
+            model=selected_model,
+            prompt=prompt,
+            payload=payload,
+            timeout_seconds=timeout,
+        )
+        _validate_mapping(result)
+        return result
+
     response = _post_chat_completion(
         base_url=base_url,
         api_key=api_key,
@@ -96,6 +110,46 @@ def _post_chat_completion(
         raise LLMError(f"LLM request failed: {exc}") from exc
 
 
+def _call_langchain_chat_openai(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    payload: dict,
+    timeout_seconds: int,
+) -> dict:
+    try:
+        from langchain_openai import ChatOpenAI
+    except ImportError as exc:
+        raise LLMError("LLM_PROVIDER=langchain requires langchain-openai") from exc
+
+    llm = ChatOpenAI(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=float(os.getenv("LLM_TEMPERATURE", "0.4")),
+        timeout=timeout_seconds,
+    ).bind(response_format={"type": "json_object"})
+    try:
+        response = llm.invoke(
+            [
+                ("system", prompt),
+                ("human", json.dumps(payload, ensure_ascii=False, indent=2)),
+            ]
+        )
+    except Exception as exc:
+        raise LLMError(f"LangChain ChatOpenAI call failed: {exc}") from exc
+
+    content = getattr(response, "content", response)
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    return _parse_json_text(str(content))
+
+
 def _parse_json_response(response: dict) -> dict:
     try:
         content = response["choices"][0]["message"]["content"]
@@ -107,6 +161,10 @@ def _parse_json_response(response: dict) -> dict:
     if not isinstance(content, str):
         raise LLMError("LLM response content is not text")
 
+    return _parse_json_text(content)
+
+
+def _parse_json_text(content: str) -> dict:
     text = _strip_code_fence(content.strip())
     try:
         return json.loads(text)

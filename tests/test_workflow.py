@@ -5,7 +5,11 @@ from pathlib import Path
 from app.agents import ImitationPlannerAgent, PlanAgent, ReportWriterAgent
 from app.cleaner import clean_items_with_metadata
 from app.workflow.evidence import build_evidence_pack
-from app.workflow.graph import clean_items, trace_writer_node
+from app.workflow.graph import clean_items, run_workflow, trace_writer_node
+from app.workflow.langgraph_runner import (
+    build_langgraph_workflow,
+    langgraph_available,
+)
 from app.workflow.router import route_from_state
 
 
@@ -174,5 +178,23 @@ def test_trace_writer_generates_agent_trace():
         assert trace["run_id"] == "run-1"
         assert trace["nodes"][0]["name"] == "plan"
         assert trace["data_quality"]["quality_score"] == 90
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_langgraph_runner_is_required():
+    assert langgraph_available()
+    assert build_langgraph_workflow() is not None
+
+
+def test_run_workflow_uses_langgraph_entrypoint():
+    output_dir = ARTIFACT_DIR / "langgraph_workflow"
+    shutil.rmtree(output_dir, ignore_errors=True)
+    try:
+        state = run_workflow("分析宠物赛道趋势", output_dir)
+        assert state["route"] == "trend_report_path"
+        assert state["trace_nodes"][0]["name"] == "plan"
+        assert any(node["name"] == "route" for node in state["trace_nodes"])
+        assert (output_dir / "trend_report.md").exists()
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)

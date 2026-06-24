@@ -1,0 +1,22 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+langgraph = "==1.1.4"
+langchain = "*"
+langchain-openai = "*"
+langsmith = "*"
+pydantic = "==2.12.4"
+playwright = "==1.60.0"
+
+[dev-packages]
+pytest = "==8.4.2"
+
+[requires]
+python_version = "3.13"
+
+[scripts]
+test = "python -m pytest tests -q"
+xhs-smoke = "python -m app.collectors.xiaohongshu_minimal --keyword 宠物 --sort latest --time-filter week --limit 3 --headless --output-dir outputs/collector-smoke"

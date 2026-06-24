@@ -1,5 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from app.agents import (
 )
 from app.cleaner import clean_items as clean_notes
 from app.cleaner import clean_items_with_metadata
+from app.collectors import collect_xiaohongshu
 from app.memory import SimpleMemory
 from app.utils import load_latest_search_results
 from app.workflow.evidence import build_evidence_pack
@@ -45,6 +47,21 @@ def memory_load_node(state: WorkflowState, memory: SimpleMemory | None = None) -
 
 
 def collector_node(state: WorkflowState) -> WorkflowState:
+    try:
+        items = asyncio.run(
+            collect_xiaohongshu(
+                state.get("keyword", "宠物"),
+                sort=state.get("sort", "popularity_descending"),
+                time_filter=state.get("time_filter", ""),
+                limit=state.get("deep_limit", 10),
+            )
+        )
+        state["collector_result"] = {"status": "success", "source": "app.collectors.xiaohongshu_minimal", "count": len(items)}
+        state["raw_items"] = items
+        return state
+    except Exception as exc:  # pragma: no cover - depends on local Playwright and login state
+        append_warning(state, "collector_failed", f"Minimal collector failed: {exc}", "collect")
+
     script = Path.home() / ".xiaohongshu-cli" / "playwright_search.py"
     if not script.exists():
         append_warning(state, "collector_missing", f"Collector script not found: {script}", "collect")
@@ -58,7 +75,7 @@ def collector_node(state: WorkflowState) -> WorkflowState:
         "--sort",
         state.get("sort", "popularity_descending"),
         "--time-filter",
-        state.get("time_filter", "一周内"),
+        state.get("time_filter", ""),
         "--deep",
         "--deep-limit",
         str(state.get("deep_limit", 10)),
@@ -67,6 +84,7 @@ def collector_node(state: WorkflowState) -> WorkflowState:
         completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=300)
         state["collector_result"] = {
             "status": "success" if completed.returncode == 0 else "failed",
+            "source": "external_playwright_search",
             "command": command,
             "exit_code": completed.returncode,
             "stdout_excerpt": (completed.stdout or "")[:1000],
@@ -75,11 +93,9 @@ def collector_node(state: WorkflowState) -> WorkflowState:
         if completed.returncode != 0:
             append_warning(state, "collector_failed", f"Collector exited with {completed.returncode}", "collect")
     except Exception as exc:  # pragma: no cover - depends on local Playwright
-        state["collector_result"] = {"status": "failed", "command": command, "message": str(exc)}
+        state["collector_result"] = {"status": "failed", "source": "external_playwright_search", "command": command, "message": str(exc)}
         append_warning(state, "collector_failed", str(exc), "collect")
     return load_latest_search_results_node(state)
-
-
 def load_latest_search_results_node(state: WorkflowState, search_dir: str | Path | None = None) -> WorkflowState:
     state["raw_items"] = load_latest_search_results(search_dir) if search_dir else load_latest_search_results()
     return state
@@ -173,7 +189,7 @@ def clean_items(raw_items: list[dict]) -> list[dict]:
     return clean_notes(raw_items)
 
 
-def run_workflow(user_query: str, output_dir: str | Path = "outputs/final_package") -> WorkflowState:
+def run_workflow_legacy(user_query: str, output_dir: str | Path = "outputs/final_package") -> WorkflowState:
     state = create_initial_state(user_query)
     state = run_traced_node(state, "plan", plan_node)
     route = route_from_state(state)
@@ -203,6 +219,12 @@ def run_workflow(user_query: str, output_dir: str | Path = "outputs/final_packag
         state = run_traced_node(state, "review", review_node)
     state = run_traced_node(state, "report", report_node, output_dir)
     return trace_writer_node(state, output_dir)
+
+
+def run_workflow(user_query: str, output_dir: str | Path = "outputs/final_package") -> WorkflowState:
+    from app.workflow.langgraph_runner import run_workflow_langgraph
+
+    return run_workflow_langgraph(user_query, output_dir)
 
 
 def _selected_agents(route: str) -> list[str]:
@@ -255,3 +277,5 @@ def _execution_path(route: str) -> list[str]:
         "report",
         "trace",
     ]
+
+
