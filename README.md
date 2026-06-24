@@ -28,12 +28,15 @@
 ```text
 app/
   agents/      # 各类规则版 agent
+  cleaner/     # 内容清洗、去重、数据质量统计
+  llm/         # 可选 LLM 结构化调用边界
   memory/      # 轻量文件记忆
   schemas/     # 计划、分析、报告结构
   utils/       # 计数、时间、JSON 加载工具
-  workflow/    # 路由和节点式工作流
+  workflow/    # 路由、节点式工作流、trace、evidence pack
 docs/
   plan.md      # 原始实现方案
+  upgrade_design.md
 tests/
   test_workflow.py
 ```
@@ -55,6 +58,21 @@ state = run_workflow("从采集到报告全做一遍")
 print(state["report_path"])
 ```
 
+默认使用规则版 agent。启用 `ImitationPlannerAgent` 的 LLM 增强：
+
+```bash
+set LLM_ENABLE=true
+set OPENAI_API_KEY=your_api_key
+set LLM_MODEL=gpt-4.1-mini
+```
+
+也可以配置兼容 OpenAI Chat Completions 的服务：
+
+```bash
+set LLM_BASE_URL=https://api.openai.com/v1
+set LLM_API_KEY=your_api_key
+```
+
 默认输出目录：
 
 ```text
@@ -63,7 +81,3 @@ outputs/final_package/
   manifest.json
   agent_trace.json
 ```
-
-## 设计文档
-
-完整实现方案见 [docs/plan.md](docs/plan.md)。
