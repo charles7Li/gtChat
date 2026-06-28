@@ -5,7 +5,12 @@ import os
 import re
 import urllib.error
 import urllib.request
+from contextvars import ContextVar, Token
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
+from typing import Any
+
+from pydantic import TypeAdapter, ValidationError
 
 
 class LLMError(RuntimeError):
@@ -14,6 +19,19 @@ class LLMError(RuntimeError):
 
 class LLMDisabledError(LLMError):
     pass
+
+
+_LLM_EVENTS: ContextVar[list[dict] | None] = ContextVar("llm_events", default=None)
+
+
+def start_llm_trace() -> Token:
+    return _LLM_EVENTS.set([])
+
+
+def finish_llm_trace(token: Token) -> list[dict]:
+    events = list(_LLM_EVENTS.get() or [])
+    _LLM_EVENTS.reset(token)
+    return events
 
 
 def structured_llm_call(
@@ -26,20 +44,39 @@ def structured_llm_call(
 ) -> dict:
     """Call an OpenAI-compatible chat completions API and parse JSON output."""
     if os.getenv("LLM_ENABLE", "").lower() not in {"1", "true", "yes"}:
-        raise LLMDisabledError("LLM_ENABLE is not enabled")
+        message = "LLM_ENABLE is not enabled"
+        _record_llm_event(prompt_name, "disabled", error=message)
+        raise LLMDisabledError(message)
 
-    api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
+    preset = os.getenv("LLM_PRESET", "").lower()
+    api_key = _api_key_for_preset(preset)
     if not api_key:
-        raise LLMDisabledError("LLM_API_KEY or OPENAI_API_KEY is required")
+        message = "LLM_API_KEY, OPENAI_API_KEY, or preset-specific API key is required"
+        _record_llm_event(prompt_name, "disabled", error=message)
+        raise LLMDisabledError(message)
 
     selected_model = model or os.getenv("LLM_MODEL", "gpt-4.1-mini")
-    base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    base_url = _base_url_for_preset(preset)
     timeout = timeout_seconds or int(os.getenv("LLM_TIMEOUT_SECONDS", "60"))
-    prompt = _load_prompt(prompt_name)
     provider = os.getenv("LLM_PROVIDER", "openai-compatible").lower()
 
-    if provider == "langchain":
-        result = _call_langchain_chat_openai(
+    try:
+        prompt = _load_prompt(prompt_name)
+        if provider == "langchain":
+            result = _call_langchain_chat_openai(
+                base_url=base_url,
+                api_key=api_key,
+                model=selected_model,
+                prompt=prompt,
+                payload=payload,
+                timeout_seconds=timeout,
+            )
+            _validate_mapping(result)
+            validated = _validate_schema(result, schema)
+            _record_llm_event(prompt_name, "success", provider=provider, model=selected_model)
+            return validated
+
+        response = _post_chat_completion(
             base_url=base_url,
             api_key=api_key,
             model=selected_model,
@@ -47,27 +84,46 @@ def structured_llm_call(
             payload=payload,
             timeout_seconds=timeout,
         )
+        result = _parse_json_response(response)
         _validate_mapping(result)
-        return result
-
-    response = _post_chat_completion(
-        base_url=base_url,
-        api_key=api_key,
-        model=selected_model,
-        prompt=prompt,
-        payload=payload,
-        timeout_seconds=timeout,
-    )
-    result = _parse_json_response(response)
-    _validate_mapping(result)
-    return result
+        validated = _validate_schema(result, schema)
+        _record_llm_event(prompt_name, "success", provider=provider, model=selected_model)
+        return validated
+    except LLMError as exc:
+        _record_llm_event(prompt_name, "failed", provider=provider, model=selected_model, error=str(exc))
+        raise
 
 
 def _load_prompt(prompt_name: str) -> str:
     prompt_path = Path(__file__).resolve().parents[1] / "prompts" / f"{prompt_name}.md"
     if not prompt_path.exists():
         raise LLMError(f"Prompt not found: {prompt_path}")
-    return prompt_path.read_text(encoding="utf-8")
+    prompt = prompt_path.read_text(encoding="utf-8")
+    skill = _load_skill(prompt_name)
+    if skill:
+        return f"{prompt}\n\n# Node Skill\n{skill}"
+    return prompt
+
+
+def _load_skill(prompt_name: str) -> str:
+    skill_path = Path(__file__).resolve().parents[1] / "skills" / f"{prompt_name}.md"
+    if not skill_path.exists():
+        return ""
+    return skill_path.read_text(encoding="utf-8").strip()
+
+
+def _api_key_for_preset(preset: str) -> str | None:
+    if preset == "packyapi":
+        return os.getenv("PACKY_API_KEY") or os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
+    return os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
+
+
+def _base_url_for_preset(preset: str) -> str:
+    if os.getenv("LLM_BASE_URL"):
+        return os.getenv("LLM_BASE_URL", "").rstrip("/")
+    if preset == "packyapi":
+        return "https://www.packyapi.com/v1"
+    return "https://api.openai.com/v1"
 
 
 def _post_chat_completion(
@@ -180,3 +236,67 @@ def _strip_code_fence(text: str) -> str:
 def _validate_mapping(result: object) -> None:
     if not isinstance(result, dict):
         raise LLMError("LLM JSON output must be an object")
+
+
+def _validate_schema(result: dict, schema: type | None) -> dict:
+    if schema is None:
+        return result
+    try:
+        validated = TypeAdapter(schema).validate_python(result)
+    except ValidationError as exc:
+        raise LLMError(f"LLM JSON output failed schema validation: {exc}") from exc
+    return _to_plain_dict(validated)
+
+
+def _to_plain_dict(value: Any) -> dict:
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if is_dataclass(value):
+        return asdict(value)
+    raise LLMError("Validated LLM output could not be converted to a dict")
+
+
+def _record_llm_event(
+    prompt_name: str,
+    status: str,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    error: str | None = None,
+) -> None:
+    events = _LLM_EVENTS.get()
+    if events is None:
+        return
+    event = {
+        "prompt": prompt_name,
+        "status": status,
+    }
+    if provider:
+        event["provider"] = provider
+    if model:
+        event["model"] = model
+    langsmith = _langsmith_context()
+    if langsmith:
+        event["langsmith"] = langsmith
+    if error:
+        event["error"] = error[:500]
+    events.append(event)
+
+
+def _langsmith_context() -> dict:
+    context = {}
+    tracing = os.getenv("LANGSMITH_TRACING") or os.getenv("LANGCHAIN_TRACING_V2")
+    project = os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT")
+    run_name = os.getenv("LANGSMITH_RUN_NAME") or os.getenv("LANGCHAIN_RUN_NAME")
+    endpoint = os.getenv("LANGSMITH_ENDPOINT")
+    if tracing:
+        context["tracing"] = tracing
+    if project:
+        context["project"] = project
+    if run_name:
+        context["run_name"] = run_name
+    if endpoint:
+        context["endpoint"] = endpoint
+    return context

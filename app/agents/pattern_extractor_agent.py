@@ -1,8 +1,36 @@
 from __future__ import annotations
 
+from app.llm import LLMError, structured_llm_call
+
 
 class PatternExtractorAgent:
+    PATTERN_KEYS = (
+        "title_patterns",
+        "opening_patterns",
+        "body_patterns",
+        "visual_patterns",
+        "interaction_patterns",
+        "replicable_templates",
+    )
+
     def run(self, clean_items: list[dict], trend_analysis: dict) -> dict:
+        llm_result = self._try_llm_patterns(clean_items, trend_analysis)
+        if llm_result:
+            return llm_result
+        return self._rule_based_patterns(clean_items, trend_analysis)
+
+    def _try_llm_patterns(self, clean_items: list[dict], trend_analysis: dict) -> dict:
+        payload = {
+            "clean_items": self._llm_items(clean_items),
+            "trend_analysis": trend_analysis,
+        }
+        try:
+            result = structured_llm_call("pattern_extractor", payload)
+        except LLMError:
+            return {}
+        return result if self._valid_patterns(result) else {}
+
+    def _rule_based_patterns(self, clean_items: list[dict], trend_analysis: dict) -> dict:
         titles = [item.get("title", "") for item in clean_items if item.get("title")]
         bodies = [item.get("body_text", "") for item in clean_items if item.get("body_text")]
         topics = trend_analysis.get("top_topics") or []
@@ -11,39 +39,56 @@ class PatternExtractorAgent:
             "title_patterns": self._title_patterns(titles),
             "opening_patterns": self._opening_patterns(bodies),
             "body_patterns": [
-                "痛点场景 -> 解决方法 -> 结果反馈",
-                "真实经历 -> 关键步骤 -> 避坑提醒",
+                "pain point scene -> practical method -> result feedback",
+                "real experience -> key steps -> mistake avoidance reminder",
             ],
-            "visual_patterns": [
-                self._visual_pattern(clean_items),
-            ],
+            "visual_patterns": [self._visual_pattern(clean_items)],
             "interaction_patterns": [
-                "结尾提出低门槛问题，引导用户分享经验",
-                "用清单式表达降低收藏成本",
+                "End with a low-friction question that invites comments",
+                "Use checklist wording to make the post easy to save",
             ],
             "replicable_templates": [
-                f"围绕{topics[0] if topics else '热点主题'}：场景开头 + 3 个实操步骤 + 对比结果",
-                "标题制造明确收益，正文补充真实过程和可复制动作",
+                f"Around {topics[0] if topics else 'the hot topic'}: scene hook + 3 practical steps + contrast result",
+                "Lead with a clear benefit in the title, then show a real process and copyable actions",
             ],
         }
 
+    def _llm_items(self, items: list[dict], limit: int = 20) -> list[dict]:
+        compact = []
+        for item in items[:limit]:
+            compact.append(
+                {
+                    "title": item.get("title", ""),
+                    "body_text": (item.get("body_text", "") or "")[:800],
+                    "tags": item.get("tags") or [],
+                    "image_count": item.get("image_count", 0),
+                    "metrics": item.get("metrics") or {},
+                }
+            )
+        return compact
+
+    def _valid_patterns(self, result: object) -> bool:
+        if not isinstance(result, dict):
+            return False
+        return all(isinstance(result.get(key), list) and result.get(key) for key in self.PATTERN_KEYS)
+
     def _title_patterns(self, titles: list[str]) -> list[str]:
         patterns = []
-        if any("!" in title or "！" in title for title in titles):
-            patterns.append("强情绪感叹标题")
+        if any("!" in title or "?" in title for title in titles):
+            patterns.append("emotion or question driven title")
         if any(any(char.isdigit() for char in title) for title in titles):
-            patterns.append("数字清单型标题")
-        if any("避坑" in title or "后悔" in title for title in titles):
-            patterns.append("避坑提醒型标题")
-        return patterns or ["结果前置型标题", "问题解决型标题"]
+            patterns.append("numbered checklist title")
+        if any("avoid" in title.lower() or "mistake" in title.lower() for title in titles):
+            patterns.append("mistake avoidance title")
+        return patterns or ["result-first title", "problem-solution title"]
 
     def _opening_patterns(self, bodies: list[str]) -> list[str]:
         if not bodies:
-            return ["直接抛出用户熟悉的痛点场景"]
-        return ["先给结论，再解释过程", "用个人经历建立真实感"]
+            return ["Open with a familiar pain point scene"]
+        return ["Give the conclusion first, then explain the process", "Use personal experience to build trust"]
 
     def _visual_pattern(self, items: list[dict]) -> str:
         image_counts = [item.get("image_count", 0) for item in items]
         if image_counts and max(image_counts) >= 6:
-            return "多图步骤拆解，首图突出结果或冲突点"
-        return "首图明确主题，正文用少量图片补充细节"
+            return "Multi-image step breakdown with the result or conflict in the first image"
+        return "Clear first image topic, then a few supporting detail images"

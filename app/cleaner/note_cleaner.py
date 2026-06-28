@@ -50,6 +50,8 @@ def clean_items_with_metadata(raw_items: list[dict]) -> dict:
                 "image_count": parse_count(raw.get("image_count") or len(raw.get("images") or [])),
                 "author": raw.get("author") or raw.get("nickname") or "",
                 "url": raw.get("url") or raw.get("link") or "",
+                "detail_url": raw.get("detail_url") or raw.get("url") or raw.get("link") or "",
+                "detail_status": raw.get("detail_status") or ("success" if body else "list_only"),
                 "created_at": parse_timestamp_ms(raw.get("created_at") or raw.get("time") or raw.get("timestamp")),
                 "created_at_raw": raw.get("created_at") or raw.get("time") or raw.get("timestamp"),
             }

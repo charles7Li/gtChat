@@ -3,9 +3,25 @@ from __future__ import annotations
 from collections import Counter
 import re
 
+from app.llm import LLMError, structured_llm_call
+
 
 class TrendAnalyzerAgent:
     def run(self, clean_items: list[dict]) -> dict:
+        llm_result = self._try_llm_analysis(clean_items)
+        if llm_result:
+            return llm_result
+        return self._rule_based_analysis(clean_items)
+
+    def _try_llm_analysis(self, clean_items: list[dict]) -> dict:
+        payload = {"clean_items": self._llm_items(clean_items)}
+        try:
+            result = structured_llm_call("trend_analyzer", payload)
+        except LLMError:
+            return {}
+        return result if self._valid_analysis(result) else {}
+
+    def _rule_based_analysis(self, clean_items: list[dict]) -> dict:
         tags = Counter()
         title_words = Counter()
         content_types = Counter()
@@ -26,7 +42,7 @@ class TrendAnalyzerAgent:
             {
                 "title": item.get("title", ""),
                 "liked_count": item.get("metrics", {}).get("liked_count", 0),
-                "reason": "标题明确且互动数据高",
+                "reason": "Clear title and strong engagement data",
             }
             for item in top_items
         ]
@@ -40,29 +56,53 @@ class TrendAnalyzerAgent:
             "summary": self._summary(clean_items, top_topics),
         }
 
+    def _llm_items(self, items: list[dict], limit: int = 20) -> list[dict]:
+        compact = []
+        for item in items[:limit]:
+            compact.append(
+                {
+                    "title": item.get("title", ""),
+                    "body_text": (item.get("body_text", "") or "")[:800],
+                    "tags": item.get("tags") or [],
+                    "content_type": item.get("content_type") or "unknown",
+                    "metrics": item.get("metrics") or {},
+                }
+            )
+        return compact
+
+    def _valid_analysis(self, result: object) -> bool:
+        if not isinstance(result, dict):
+            return False
+        required_lists = ("top_topics", "hot_emotions", "audience_pain_points", "high_engagement_reasons")
+        if not all(isinstance(result.get(key), list) and result.get(key) for key in required_lists):
+            return False
+        if not isinstance(result.get("content_type_distribution"), dict):
+            return False
+        return bool(result.get("summary"))
+
     def _keywords(self, text: str) -> list[str]:
         words = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,}", text or "")
-        stop = {"一个", "这个", "真的", "如何", "什么", "小红书"}
-        return [word for word in words if word not in stop]
+        stop = {"this", "that", "how", "what", "xiaohongshu"}
+        return [word for word in words if word.lower() not in stop]
 
     def _emotion_hints(self, items: list[dict]) -> list[str]:
-        text = " ".join((item.get("title", "") + " " + item.get("body_text", "")) for item in items)
+        text = " ".join((item.get("title", "") + " " + item.get("body_text", "")) for item in items).lower()
         hints = []
-        for word in ("治愈", "焦虑", "省钱", "惊喜", "真实", "避坑"):
+        for word in ("healing", "anxiety", "save money", "surprise", "real", "avoid"):
             if word in text:
                 hints.append(word)
-        return hints or ["真实感", "实用性", "陪伴感"]
+        return hints or ["authentic", "practical", "companionship"]
 
     def _pain_points(self, items: list[dict]) -> list[str]:
-        text = " ".join(item.get("body_text", "") for item in items)
+        text = " ".join(item.get("body_text", "") for item in items).lower()
         points = []
-        for word in ("不会", "困难", "踩坑", "贵", "麻烦", "不知道"):
+        for word in ("hard", "expensive", "mistake", "confusing", "trouble"):
             if word in text:
                 points.append(word)
-        return points or ["用户需要更低门槛的执行方法"]
+        return points or ["Users need lower-friction steps they can copy quickly"]
 
     def _summary(self, items: list[dict], topics: list[str]) -> str:
         if not items:
-            return "暂无可分析数据，建议先补充近期搜索结果。"
-        topic_text = "、".join(topics[:5]) if topics else "内容体验"
-        return f"本次共分析 {len(items)} 条内容，热点集中在 {topic_text}。"
+            return "No clean items are available yet. Collect or load recent search results first."
+        topic_text = ", ".join(topics[:5]) if topics else "content experience"
+        return f"Analyzed {len(items)} items. Current topics cluster around {topic_text}."

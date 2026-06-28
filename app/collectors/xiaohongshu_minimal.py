@@ -1,10 +1,12 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import asyncio
 import json
 import os
+import random
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -58,6 +60,7 @@ async def collect_xiaohongshu(
     sort: str = "popularity_descending",
     time_filter: str = "",
     limit: int = 20,
+    detail_limit: int | None = None,
     output_dir: str | Path = DEFAULT_SEARCH_DIR,
     headless: bool | None = None,
 ) -> list[dict]:
@@ -72,35 +75,108 @@ async def collect_xiaohongshu(
         raise RuntimeError("Playwright is required: pip install playwright && playwright install chromium") from exc
 
     limit = max(1, int(limit or 20))
+    if detail_limit is None:
+        detail_limit = int(os.getenv("XHS_DETAIL_LIMIT", "5"))
     if headless is None:
         headless = os.getenv("XHS_HEADLESS", "0") == "1"
 
     async with async_playwright() as playwright:
         user_data_dir = os.getenv("XHS_USER_DATA_DIR")
         browser = None
+        launch_options = browser_launch_options(headless=headless)
         if user_data_dir:
-            context = await playwright.chromium.launch_persistent_context(user_data_dir, headless=headless)
+            context = await playwright.chromium.launch_persistent_context(user_data_dir, **launch_options)
         else:
-            browser = await playwright.chromium.launch(headless=headless)
+            browser = await playwright.chromium.launch(**launch_options)
             context = await browser.new_context()
 
         page = await context.new_page()
         try:
             await page.goto(build_search_url(keyword), wait_until="domcontentloaded")
-            await page.wait_for_timeout(1200)
+            await human_delay(page, "page")
             await apply_filters(page, sort=sort, time_filter=time_filter)
             await scroll_for_results(page, limit)
             raw_items = await extract_state_items(page)
             if not raw_items:
                 raw_items = await extract_dom_items(page)
             items = normalize_feed_items(raw_items, limit=limit)
+            if detail_limit:
+                items = await enrich_note_details(context, items, limit=detail_limit)
+            if not items:
+                await write_debug_snapshot(page, keyword, output_dir)
             write_results(items, keyword, output_dir)
             return items
         finally:
             await context.close()
             if browser:
                 await browser.close()
+async def login_xiaohongshu(profile_dir: str | Path, *, start_url: str = "https://www.xiaohongshu.com/explore") -> None:
+    """Open a persistent browser profile and wait for the user to log in."""
 
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise RuntimeError("Playwright is required: pip install playwright && playwright install chromium") from exc
+
+    async with async_playwright() as playwright:
+        context = await playwright.chromium.launch_persistent_context(
+            str(profile_dir),
+            **browser_launch_options(headless=False),
+        )
+        page = await context.new_page()
+        try:
+            await page.goto(start_url, wait_until="domcontentloaded")
+            print("Browser opened. Log in to Xiaohongshu in that window, then return here and press Enter to save the profile.")
+            await asyncio.to_thread(input)
+        finally:
+            await context.close()
+
+async def raise_if_blocked(page, keyword: str, output_dir: str | Path = DEFAULT_SEARCH_DIR) -> None:
+    status = await page.evaluate(
+        r"""
+        () => {
+          const text = document.body?.innerText || '';
+          const url = location.href;
+          if (url.includes('/website-login/error') || url.includes('error_code=300012') || text.includes('IP存在风险') || text.includes('安全限制')) {
+            return { blocked: true, url, text: text.slice(0, 300) };
+          }
+          if (text.includes('登录后查看搜索结果')) {
+            return { blocked: true, url, text: text.slice(0, 300) };
+          }
+          return { blocked: false, url, text: '' };
+        }
+        """
+    )
+    if status.get("blocked"):
+        await write_debug_snapshot(page, keyword, output_dir)
+        raise RuntimeError(f"Xiaohongshu blocked search access: {status.get('text') or status.get('url')}")
+
+def browser_launch_options(*, headless: bool) -> dict:
+    options = {"headless": headless}
+    chrome_path = find_chrome_executable()
+    if chrome_path:
+        options["executable_path"] = chrome_path
+    return options
+
+
+def find_chrome_executable() -> str:
+    env_path = os.getenv("XHS_CHROME_PATH")
+    if env_path and Path(env_path).exists():
+        return env_path
+    for command in ("chrome", "msedge", "chromium"):
+        found = shutil.which(command)
+        if found:
+            return found
+    for path in (
+        Path(os.getenv("ProgramFiles", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.getenv("ProgramFiles(x86)", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.getenv("LOCALAPPDATA", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.getenv("ProgramFiles", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(os.getenv("ProgramFiles(x86)", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+    ):
+        if path.exists():
+            return str(path)
+    return ""
 
 async def apply_filters(page, *, sort: str = "popularity_descending", time_filter: str = "") -> None:
     sort_label = resolve_sort_label(sort)
@@ -108,14 +184,18 @@ async def apply_filters(page, *, sort: str = "popularity_descending", time_filte
     if not sort_label and not time_label:
         return
 
+    await human_delay(page, "filter")
     opened = await open_filter_panel(page)
     if not opened:
         return
+    await human_delay(page, "filter")
     if sort_label:
         await click_filter_tag(page, SORT_SECTION_LABEL, sort_label)
+        await human_delay(page, "filter")
     if time_label:
         await click_filter_tag(page, TIME_SECTION_LABEL, time_label)
-    await page.wait_for_timeout(1000)
+        await human_delay(page, "filter")
+    await human_delay(page, "filter")
 
 
 async def open_filter_panel(page) -> bool:
@@ -171,7 +251,7 @@ async def scroll_for_results(page, limit: int) -> None:
         if count >= limit:
             break
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await page.wait_for_timeout(900)
+        await human_delay(page, "scroll")
 
 
 async def extract_state_items(page) -> list[dict]:
@@ -222,6 +302,84 @@ async def extract_dom_items(page) -> list[dict]:
     return rows if isinstance(rows, list) else []
 
 
+async def enrich_note_details(context, items: list[dict], *, limit: int = 5) -> list[dict]:
+    enriched = []
+    for index, item in enumerate(items):
+        if index >= limit or not item.get("url"):
+            enriched.append(item)
+            continue
+        page = await context.new_page()
+        try:
+            await human_delay(page, "detail")
+            await page.goto(item["url"], wait_until="domcontentloaded")
+            await human_delay(page, "page")
+            detail = await extract_note_detail(page)
+            enriched.append({**item, **detail, "detail_status": "success"})
+        except Exception as exc:  # pragma: no cover - depends on live site behavior
+            enriched.append({**item, "detail_status": "failed", "detail_error": str(exc)[:300]})
+        finally:
+            await page.close()
+    return enriched
+
+
+async def extract_note_detail(page) -> dict:
+    script = r"""
+    () => {
+      const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+      const text = document.body?.innerText || '';
+      const title = clean(
+        document.querySelector('#detail-title, .title, .note-title, h1')?.textContent || ''
+      );
+      const body = clean(
+        document.querySelector('#detail-desc, .desc, .note-content, .content, [class*=desc]')?.textContent || ''
+      );
+      const tags = Array.from(document.querySelectorAll('a[href*="/search_result?keyword="], .tag, [class*=tag]'))
+        .map(el => clean(el.textContent).replace(/^#/, ''))
+        .filter(Boolean)
+        .slice(0, 20);
+      return {
+        detail_url: location.href,
+        title: title || undefined,
+        body_text: body || clean(text).slice(0, 1500),
+        tags,
+        image_count: document.querySelectorAll('img').length,
+      };
+    }
+    """
+    detail = await page.evaluate(script)
+    return detail if isinstance(detail, dict) else {}
+
+
+async def human_delay(page, phase: str = "page") -> None:
+    seconds = random_delay_seconds(phase)
+    await page.wait_for_timeout(round(seconds * 1000))
+
+
+def random_delay_seconds(phase: str = "page") -> float:
+    if phase == "detail":
+        minimum = _float_env("XHS_DETAIL_DELAY_MIN", 5.0)
+        maximum = _float_env("XHS_DETAIL_DELAY_MAX", 12.0)
+    elif phase == "filter":
+        minimum = _float_env("XHS_FILTER_DELAY_MIN", 2.5)
+        maximum = _float_env("XHS_FILTER_DELAY_MAX", 6.0)
+    elif phase == "scroll":
+        minimum = _float_env("XHS_SCROLL_DELAY_MIN", 1.5)
+        maximum = _float_env("XHS_SCROLL_DELAY_MAX", 4.0)
+    else:
+        minimum = _float_env("XHS_DELAY_MIN", 2.0)
+        maximum = _float_env("XHS_DELAY_MAX", 5.0)
+    if maximum < minimum:
+        maximum = minimum
+    return random.uniform(minimum, maximum)
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
 def normalize_feed_items(raw_items: list[dict], *, limit: int = 20) -> list[dict]:
     items: list[dict] = []
     seen: set[str] = set()
@@ -256,6 +414,27 @@ def normalize_item(raw: dict) -> dict:
         "url": url,
     }
 
+async def write_debug_snapshot(page, keyword: str, output_dir: str | Path = DEFAULT_SEARCH_DIR) -> Path:
+    directory = Path(output_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_keyword = re.sub(r"[^\w\-]+", "_", keyword, flags=re.UNICODE).strip("_") or "search"
+    snapshot = await page.evaluate(
+        r"""
+        () => ({
+          url: location.href,
+          title: document.title,
+          body_excerpt: (document.body?.innerText || '').slice(0, 2000),
+          note_item_count: document.querySelectorAll('section.note-item').length,
+          note_link_count: document.querySelectorAll('a[href*="/explore/"], a[href*="/search_result/"]').length,
+          has_initial_state: Boolean(window.__INITIAL_STATE__),
+          state_feed_count: window.__INITIAL_STATE__?.search?.feeds?._value?.length || 0,
+        })
+        """
+    )
+    path = directory / f"debug_{safe_keyword}_{stamp}.json"
+    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
 
 def write_results(items: list[dict], keyword: str, output_dir: str | Path = DEFAULT_SEARCH_DIR) -> Path:
     directory = Path(output_dir)
@@ -280,7 +459,15 @@ def main() -> None:
     parser.add_argument("--limit", "--deep-limit", dest="limit", type=int, default=20)
     parser.add_argument("--output-dir", default=str(DEFAULT_SEARCH_DIR))
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--login", action="store_true", help="Open a persistent browser profile and wait for manual login")
+    parser.add_argument("--profile-dir", default=os.getenv("XHS_USER_DATA_DIR") or ".xhs-profile")
     args = parser.parse_args()
+    if args.login:
+        asyncio.run(login_xiaohongshu(args.profile_dir))
+        print(json.dumps({"profile_dir": str(Path(args.profile_dir).resolve()), "status": "saved"}, ensure_ascii=False))
+        return
+    if args.profile_dir and not os.getenv("XHS_USER_DATA_DIR"):
+        os.environ["XHS_USER_DATA_DIR"] = args.profile_dir
     items = asyncio.run(
         collect_xiaohongshu(
             args.keyword,
@@ -296,4 +483,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
