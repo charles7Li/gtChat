@@ -2,7 +2,13 @@
 
 一个基于 LangGraph 的 Planner-driven Multi-Agent Workflow，用 agent 管道完成小红书内容趋势分析、爆款模式提取、仿拍选题生成、方案评审和 Markdown 报告输出。
 
-第一版刻意保持轻量：不做复杂 Supervisor，不引入外部 memory 框架，不重构现有采集脚本。
+当前升级保持轻量：不做复杂 Supervisor，不引入外部 memory 框架，不重构现有采集脚本。
+
+## 升级迭代状态
+
+- Iteration 1：`run_workflow` 已切换为 LangGraph `StateGraph` 编排，保留 `run_workflow_legacy` 作为手写顺序执行入口。
+- Iteration 2：LangGraph 节点统一进入 `run_node` hook pipeline，支持输入检查、输出检查、trace 摘要和错误记录。
+- LangChain：`LLM_PROVIDER=langchain` 可走 `langchain-openai`，并与默认 OpenAI-compatible 路径共享 JSON schema 校验。
 
 ## 功能
 
@@ -46,7 +52,7 @@ tests/
 安装测试依赖后运行：
 
 ```bash
-pip install langgraph
+pip install langgraph langchain langchain-openai pydantic
 python -m pytest tests -q
 ```
 
@@ -74,6 +80,12 @@ set LLM_BASE_URL=https://api.openai.com/v1
 set LLM_API_KEY=your_api_key
 ```
 
+使用 LangChain provider：
+
+```bash
+set LLM_PROVIDER=langchain
+```
+
 默认输出目录：
 
 ```text
@@ -81,4 +93,21 @@ outputs/final_package/
   trend_report.md
   manifest.json
   agent_trace.json
+```
+
+## PackyAPI
+
+PackyAPI is OpenAI-compatible. Use the preset below to set the official base URL:
+
+```powershell
+$env:LLM_ENABLE="true"
+$env:LLM_PRESET="packyapi"
+$env:PACKY_API_KEY="your_packyapi_key"
+$env:LLM_MODEL="gpt-4.1-mini"
+```
+
+Override the endpoint only when needed:
+
+```powershell
+$env:LLM_BASE_URL="https://api-slb.packyapi.com/v1"
 ```

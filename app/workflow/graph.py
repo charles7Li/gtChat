@@ -22,7 +22,7 @@ from app.utils import load_latest_search_results
 from app.workflow.evidence import build_evidence_pack
 from app.workflow.router import route_from_state
 from app.workflow.state import WorkflowState, create_initial_state
-from app.workflow.trace import append_warning, run_traced_node
+from app.workflow.trace import ProgressCallback, append_warning, run_traced_node
 
 
 def plan_node(state: WorkflowState) -> WorkflowState:
@@ -42,7 +42,8 @@ def plan_node(state: WorkflowState) -> WorkflowState:
 
 
 def memory_load_node(state: WorkflowState, memory: SimpleMemory | None = None) -> WorkflowState:
-    state["memory_context"] = (memory or SimpleMemory()).load()
+    keyword = state.get("keyword") or (state.get("plan") or {}).get("keyword")
+    state["memory_context"] = (memory or SimpleMemory()).load(keyword=keyword)
     return state
 
 
@@ -221,10 +222,14 @@ def run_workflow_legacy(user_query: str, output_dir: str | Path = "outputs/final
     return trace_writer_node(state, output_dir)
 
 
-def run_workflow(user_query: str, output_dir: str | Path = "outputs/final_package") -> WorkflowState:
+def run_workflow(
+    user_query: str,
+    output_dir: str | Path = "outputs/final_package",
+    progress_callback: ProgressCallback | None = None,
+) -> WorkflowState:
     from app.workflow.langgraph_runner import run_workflow_langgraph
 
-    return run_workflow_langgraph(user_query, output_dir)
+    return run_workflow_langgraph(user_query, output_dir, progress_callback=progress_callback)
 
 
 def _selected_agents(route: str) -> list[str]:

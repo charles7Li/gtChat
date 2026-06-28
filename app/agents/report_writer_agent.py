@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+from app.llm import LLMError, structured_llm_call
 
 
 class ReportWriterAgent:
@@ -11,11 +14,18 @@ class ReportWriterAgent:
 
     def run(self, state: dict) -> dict:
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        report = self._render_markdown(state)
-        report_path = self.output_dir / "trend_report.md"
+        created_at = datetime.now()
+        title_stamp = created_at.strftime("%Y-%m-%d %H:%M:%S")
+        filename_stamp = created_at.strftime("%Y%m%d-%H%M%S")
+        brief = _brief_from_state(state)
+        report = self._try_llm_report(state) or self._render_markdown(state)
+        report = _stamp_report_title(report, title_stamp, brief)
+        report_path = self.output_dir / f"{filename_stamp}_{_safe_filename_part(brief)}_trend_report.md"
+        latest_report_path = self.output_dir / "trend_report.md"
         manifest_path = self.output_dir / "manifest.json"
         evidence_path = self.output_dir / "evidence_pack.json"
         report_path.write_text(report, encoding="utf-8")
+        latest_report_path.write_text(report, encoding="utf-8")
         evidence_path.write_text(
             json.dumps(state.get("evidence_pack", {}), ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -23,6 +33,8 @@ class ReportWriterAgent:
         manifest = {
             "run_id": state.get("run_id"),
             "report": str(report_path),
+            "latest_report": str(latest_report_path),
+            "report_title_brief": brief,
             "agent_trace": str(self.output_dir / "agent_trace.json"),
             "evidence_pack": str(evidence_path),
             "route": state.get("route"),
@@ -33,9 +45,33 @@ class ReportWriterAgent:
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         state["final_report"] = report
         state["report_path"] = str(report_path)
+        state["latest_report_path"] = str(latest_report_path)
         state["manifest_path"] = str(manifest_path)
         state["evidence_path"] = str(evidence_path)
         return state
+
+    def _try_llm_report(self, state: dict) -> str:
+        payload = {
+            "user_query": state.get("user_query", ""),
+            "route": state.get("route", ""),
+            "keyword": (state.get("plan") or {}).get("keyword", state.get("keyword")),
+            "data_quality": state.get("data_quality", {}),
+            "trend_analysis": state.get("trend_analysis", {}),
+            "pattern_analysis": state.get("pattern_analysis", {}),
+            "evidence_pack": state.get("evidence_pack", {}),
+            "imitation_plans": state.get("imitation_plans", []),
+            "review_result": state.get("review_result", {}),
+            "warnings": state.get("warnings", []),
+        }
+        try:
+            result = structured_llm_call("report_writer", payload)
+        except LLMError:
+            return ""
+        report = result.get("final_report") if isinstance(result, dict) else None
+        return report if self._valid_report(report) else ""
+
+    def _valid_report(self, report: object) -> bool:
+        return isinstance(report, str) and report.startswith("#") and len(report) >= 200
 
     def _render_markdown(self, state: dict) -> str:
         plan = state.get("plan") or {}
@@ -132,3 +168,29 @@ class ReportWriterAgent:
         for warning in warnings:
             lines.append(f"- [{warning.get('code', 'warning')}] {warning.get('message', '')}")
         return "\n".join(lines)
+
+
+def _brief_from_state(state: dict, max_length: int = 28) -> str:
+    query = str(state.get("user_query") or "").strip()
+    keyword = str((state.get("plan") or {}).get("keyword") or state.get("keyword") or "").strip()
+    route = str(state.get("route") or "").replace("_path", "")
+    text = query or keyword or route or "report"
+    text = re.sub(r"\s+", "", text)
+    return text[:max_length] or "report"
+
+
+def _safe_filename_part(text: str) -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text)
+    cleaned = cleaned.strip(" ._")
+    return cleaned or "report"
+
+
+def _stamp_report_title(report: str, stamp: str, brief: str) -> str:
+    lines = report.splitlines()
+    heading = f"# {stamp}｜{brief}"
+    for index, line in enumerate(lines):
+        if line.startswith("# "):
+            original = line[2:].strip()
+            lines[index] = f"{heading}｜{original}" if original else heading
+            return "\n".join(lines) + ("\n" if report.endswith("\n") else "")
+    return heading + "\n\n" + report

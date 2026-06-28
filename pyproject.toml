@@ -1,2 +1,6 @@
 [tool.pytest.ini_options]
 addopts = "-p no:cacheprovider"
+norecursedirs = [
+    "tests/_*",
+    "pytest-cache-files-*",
+]
