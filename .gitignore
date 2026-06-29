@@ -28,3 +28,22 @@ env/
 # OS files
 .DS_Store
 Thumbs.db
+docs/local_environment.md
+docs/xiaohongshu-search-filter.md
+docs/upgrade/00-master-plan.md
+docs/upgrade/01-data-pipeline.md
+docs/upgrade/02-llm-and-evidence.md
+docs/upgrade/03-node-runner-hooks.md
+docs/upgrade/04-reporting-memory-trace.md
+docs/upgrade/05-testing.md
+docs/upgrade/06-langchain-langgraph-langsmith.md
+docs/upgrade/07-artifact-contracts.md
+docs/upgrade/08-route-manifests.md
+docs/upgrade/09-checkpoints-decision-log.md
+docs/upgrade/10-stage-review-gates.md
+docs/upgrade/11-local-reference-video-analysis.md
+docs/upgrade/12-douyin-collection-upgrade.md
+docs/upgrade/13-xiaohongshu-collector-login-upgrade.md
+docs/upgrade/14-application-modes-and-subagents.md
+docs/upgrade/15-sqlite-event-queue.md
+docs/upgrade/99-windows-exe-packaging.md

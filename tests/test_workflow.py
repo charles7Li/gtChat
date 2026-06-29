@@ -13,14 +13,17 @@ from app.cleaner import clean_items_with_metadata
 from app.llm import LLMError, structured_llm_call
 from app.llm.structured_call import _load_prompt, _load_skill
 from app.memory import SimpleMemory
+from app.schemas.analysis import PatternExtractionResult, ReviewResult
 from app.workflow.evidence import build_evidence_pack
 from app.workflow.graph import clean_items, run_workflow, trace_writer_node
 from app.workflow.langgraph_runner import (
     build_langgraph_workflow,
     langgraph_available,
+    run_workflow_langgraph,
 )
+from app.workflow.route_manifest import load_route_manifests
 from app.workflow.router import route_from_state
-from app.workflow.trace import require_state_keys, run_node, warn_dict_missing_keys, warn_missing_outputs
+from app.workflow.trace import NODE_CONTRACTS, require_state_keys, run_node, warn_dict_missing_keys, warn_missing_outputs
 
 
 ARTIFACT_DIR = Path(__file__).parent / "_artifacts"
@@ -44,6 +47,12 @@ def test_plan_agent_routes_imitation_plan():
 def test_plan_agent_routes_full_pipeline():
     plan = PlanAgent().run("从采集到报告全做一遍")
     assert plan["route"] == "full_pipeline_path"
+
+
+def test_plan_agent_routes_reference_video_imitation():
+    plan = PlanAgent().run(r"基于参考视频 path=C:\tmp\video_analysis_brief.json 生成仿拍")
+    assert plan["route"] == "reference_video_imitation_path"
+    assert plan["reference_video_path"] == r"C:\tmp\video_analysis_brief.json"
 
 
 def test_cleaner_parses_wan_count():
@@ -266,6 +275,7 @@ def test_trend_analyzer_falls_back_when_llm_output_invalid(monkeypatch):
 def test_pattern_extractor_uses_valid_llm_output(monkeypatch):
     def fake_llm_call(prompt_name, payload, schema=None, *, model=None, timeout_seconds=None):
         assert prompt_name == "pattern_extractor"
+        assert schema is PatternExtractionResult
         assert payload["trend_analysis"]["top_topics"] == ["pet"]
         return {
             "title_patterns": ["result-first title"],
@@ -299,6 +309,7 @@ def test_pattern_extractor_falls_back_when_llm_output_invalid(monkeypatch):
 def test_review_agent_uses_valid_llm_output(monkeypatch):
     def fake_llm_call(prompt_name, payload, schema=None, *, model=None, timeout_seconds=None):
         assert prompt_name == "review_agent"
+        assert schema is ReviewResult
         assert payload["imitation_plans"][1]["idea_title"] == "second"
         return {
             "overall_score": 91,
@@ -335,7 +346,71 @@ def test_router_returns_route_from_state():
     assert route_from_state({"route": "trend_report_path"}) == "trend_report_path"
     assert route_from_state({"route": "imitation_plan_path"}) == "imitation_plan_path"
     assert route_from_state({"route": "full_pipeline_path"}) == "full_pipeline_path"
+    assert route_from_state({"route": "reference_video_imitation_path"}) == "reference_video_imitation_path"
     assert route_from_state({"route": "unknown"}) == "trend_report_path"
+
+
+def test_route_manifests_match_current_langgraph_paths():
+    manifests = load_route_manifests()
+    runner_nodes = set(NODE_CONTRACTS) | {"store", "memory_write", "trace"}
+
+    assert set(manifests) == {"trend_report_path", "imitation_plan_path", "full_pipeline_path", "reference_video_imitation_path"}
+    assert manifests["trend_report_path"].stage_names == [
+        "plan",
+        "route",
+        "memory_load",
+        "load_latest_search_results",
+        "clean",
+        "trend_analyze",
+        "pattern_extract",
+        "evidence_pack",
+        "report",
+        "trace",
+    ]
+    assert manifests["imitation_plan_path"].stage_names == [
+        "plan",
+        "route",
+        "memory_load",
+        "load_latest_search_results",
+        "clean",
+        "trend_analyze",
+        "pattern_extract",
+        "evidence_pack",
+        "imitation_plan",
+        "review",
+        "report",
+        "trace",
+    ]
+    assert manifests["full_pipeline_path"].stage_names == [
+        "plan",
+        "route",
+        "memory_load",
+        "collect",
+        "clean",
+        "store",
+        "trend_analyze",
+        "pattern_extract",
+        "evidence_pack",
+        "imitation_plan",
+        "review",
+        "report",
+        "memory_write",
+        "trace",
+    ]
+    assert manifests["reference_video_imitation_path"].stage_names == [
+        "plan",
+        "route",
+        "local_video_analyze",
+        "video_pattern_extract",
+        "imitation_plan",
+        "review",
+        "report",
+        "trace",
+    ]
+    for manifest in manifests.values():
+        assert set(manifest.stage_names) <= runner_nodes
+        if not manifest.allow_live_collect:
+            assert "collect" not in manifest.stage_names
 
 
 def test_report_writer_generates_trend_report():
@@ -540,11 +615,16 @@ def test_run_node_records_disabled_llm_event(monkeypatch):
     event = result["trace_nodes"][0]["llm_events"][0]
     assert event["prompt"] == "imitation_planner"
     assert event["status"] == "disabled"
+    assert event["prompt_version"]
+    assert isinstance(event["latency_ms"], int)
 
 
 def test_run_node_records_successful_llm_event(monkeypatch):
     def fake_post_chat_completion(**kwargs):
-        return {"choices": [{"message": {"content": '{"title": "ok", "score": 88}'}}]}
+        return {
+            "choices": [{"message": {"content": '{"title": "ok", "score": 88}'}}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+        }
 
     def llm_node(state):
         state["llm_result"] = structured_llm_call("imitation_planner", {"topic": "pet"}, FakeLLMPlan)
@@ -566,6 +646,9 @@ def test_run_node_records_successful_llm_event(monkeypatch):
     assert event["prompt"] == "imitation_planner"
     assert event["status"] == "success"
     assert event["model"] == "fake-model"
+    assert event["prompt_version"]
+    assert isinstance(event["latency_ms"], int)
+    assert event["token_usage"] == {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
     assert event["langsmith"] == {"tracing": "true", "project": "gtchat-dev"}
     assert "secret" not in str(event)
 
@@ -613,16 +696,209 @@ def test_langgraph_runner_is_required():
     assert build_langgraph_workflow() is not None
 
 
-def test_run_workflow_uses_langgraph_entrypoint():
-    output_dir = ARTIFACT_DIR / "langgraph_workflow"
+def test_langgraph_runner_passes_langsmith_config_when_enabled(monkeypatch):
+    seen = {}
+
+    class FakeGraphApp:
+        def invoke(self, state, config=None):
+            seen["state"] = state
+            seen["config"] = config
+            return state
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "gtchat-test")
+    monkeypatch.setenv("LANGSMITH_RUN_NAME", "custom-run")
+    monkeypatch.setattr("app.workflow.langgraph_runner.build_langgraph_workflow", lambda *args, **kwargs: FakeGraphApp())
+
+    state = run_workflow_langgraph("生成仿拍选题")
+
+    assert state["user_query"] == "生成仿拍选题"
+    assert seen["config"]["run_name"] == "custom-run"
+    assert seen["config"]["tags"] == ["gtchat", "langgraph"]
+    assert seen["config"]["metadata"]["project"] == "gtchat-test"
+    assert seen["config"]["metadata"]["entrypoint"] == "langgraph"
+
+
+def test_langgraph_runner_skips_langsmith_config_by_default(monkeypatch):
+    seen = {}
+
+    class FakeGraphApp:
+        def invoke(self, state, config=None):
+            seen["config"] = config
+            return state
+
+    monkeypatch.delenv("LANGSMITH_TRACING", raising=False)
+    monkeypatch.delenv("LANGCHAIN_TRACING_V2", raising=False)
+    monkeypatch.setattr("app.workflow.langgraph_runner.build_langgraph_workflow", lambda *args, **kwargs: FakeGraphApp())
+
+    run_workflow_langgraph("分析宠物赛道趋势")
+
+    assert seen["config"] is None
+
+
+def test_run_workflow_reference_video_imitation_path(monkeypatch):
+    output_dir = ARTIFACT_DIR / "reference_video_workflow"
+    brief_dir = ARTIFACT_DIR / "reference_video_input"
+    brief_path = brief_dir / "video_analysis_brief.json"
     shutil.rmtree(output_dir, ignore_errors=True)
+    shutil.rmtree(brief_dir, ignore_errors=True)
+    brief_dir.mkdir(parents=True, exist_ok=True)
+    brief_path.write_text(
+        json.dumps(
+            {
+                "source": {"local_path": "reference.mp4", "title": "宠物洗护前后对比", "duration_seconds": 18},
+                "transcript": {"full_text": "先展示洗护前后对比，再拆步骤。", "segments": [], "word_count": 16, "language": "zh"},
+                "structure_analysis": {"total_scenes": 3, "scenes": []},
+                "keyframes": ["keyframes/frame_0000.jpg"],
+                "style_profile": {"visual_patterns": ["first frame shows before after contrast"]},
+                "replication_guidance": {
+                    "topic": "宠物洗护",
+                    "replicable_templates": ["before after hook -> three cleaning steps -> result close-up"],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("LLM_ENABLE", raising=False)
     try:
-        state = run_workflow("分析宠物赛道趋势", output_dir)
-        assert state["route"] == "trend_report_path"
-        assert state["trace_nodes"][0]["name"] == "plan"
-        assert any(node["name"] == "route" for node in state["trace_nodes"])
-        assert all("input_summary" in node for node in state["trace_nodes"])
-        assert all("output_summary" in node for node in state["trace_nodes"])
+        state = run_workflow(f"基于参考视频 path={brief_path} 生成仿拍", output_dir)
+        trace = json.loads((output_dir / "agent_trace.json").read_text(encoding="utf-8"))
+
+        assert state["route"] == "reference_video_imitation_path"
+        assert state["reference_video_path"] == str(brief_path)
+        assert state["trend_analysis"]["top_topics"] == ["宠物洗护"]
+        assert state["pattern_analysis"]["replicable_templates"][0].startswith("before after hook")
+        assert len(state["imitation_plans"]) == 3
+        assert [node["name"] for node in state["trace_nodes"]] == [
+            "plan",
+            "route",
+            "local_video_analyze",
+            "video_pattern_extract",
+            "imitation_plan",
+            "review",
+            "report",
+        ]
+        assert trace["route"] == "reference_video_imitation_path"
         assert (output_dir / "trend_report.md").exists()
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
+        shutil.rmtree(brief_dir, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    ("query", "route", "expected_nodes"),
+    [
+        (
+            "分析宠物赛道趋势",
+            "trend_report_path",
+            [
+                "plan",
+                "route",
+                "memory_load",
+                "load_latest_search_results",
+                "clean",
+                "trend_analyze",
+                "pattern_extract",
+                "evidence_pack",
+                "report",
+            ],
+        ),
+        (
+            "生成仿拍选题",
+            "imitation_plan_path",
+            [
+                "plan",
+                "route",
+                "memory_load",
+                "load_latest_search_results",
+                "clean",
+                "trend_analyze",
+                "pattern_extract",
+                "evidence_pack",
+                "imitation_plan",
+                "review",
+                "report",
+            ],
+        ),
+        (
+            "从采集到报告全做一遍",
+            "full_pipeline_path",
+            [
+                "plan",
+                "route",
+                "memory_load",
+                "collect",
+                "clean",
+                "store",
+                "trend_analyze",
+                "pattern_extract",
+                "evidence_pack",
+                "imitation_plan",
+                "review",
+                "report",
+                "memory_write",
+            ],
+        ),
+    ],
+)
+def test_run_workflow_uses_langgraph_entrypoint_for_all_routes(monkeypatch, query, route, expected_nodes):
+    output_dir = ARTIFACT_DIR / f"langgraph_workflow_{route}"
+    shutil.rmtree(output_dir, ignore_errors=True)
+
+    def fake_memory_load(state):
+        state["memory_context"] = {"index": {}, "recent_runs": [], "keyword_runs": [], "summary": ""}
+        return state
+
+    def fake_load_latest_search_results(state):
+        state["raw_items"] = _workflow_fixture_items()
+        return state
+
+    def fake_collect(state):
+        state["collector_result"] = {"status": "success", "source": "fixture", "count": 1}
+        state["raw_items"] = _workflow_fixture_items()
+        return state
+
+    def fake_store(state):
+        return state
+
+    def fake_memory_write(state):
+        state["memory_written"] = True
+        return state
+
+    monkeypatch.setattr("app.workflow.langgraph_runner.memory_load_node", fake_memory_load)
+    monkeypatch.setattr("app.workflow.langgraph_runner.load_latest_search_results_node", fake_load_latest_search_results)
+    monkeypatch.setattr("app.workflow.langgraph_runner.collector_node", fake_collect)
+    monkeypatch.setattr("app.workflow.langgraph_runner.storage_node", fake_store)
+    monkeypatch.setattr("app.workflow.langgraph_runner.memory_write_node", fake_memory_write)
+
+    try:
+        state = run_workflow(query, output_dir)
+        trace = json.loads((output_dir / "agent_trace.json").read_text(encoding="utf-8"))
+
+        assert state["route"] == route
+        assert [node["name"] for node in state["trace_nodes"]] == expected_nodes
+        assert all("input_summary" in node for node in state["trace_nodes"])
+        assert all("output_summary" in node for node in state["trace_nodes"])
+        assert trace["route"] == route
+        assert [node["name"] for node in trace["nodes"]] == expected_nodes
+        assert state["trace_path"] == str(output_dir / "agent_trace.json")
+        assert (output_dir / "trend_report.md").exists()
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def _workflow_fixture_items():
+    return [
+        {
+            "id": "fixture-1",
+            "title": "宠物用品避坑清单",
+            "body_text": "新手养宠常见痛点和解决步骤",
+            "tags": ["宠物", "避坑"],
+            "content_type": "note",
+            "liked_count": "100",
+            "collected_count": "20",
+            "comment_count": "5",
+            "created_at": 1718000000000,
+        }
+    ]

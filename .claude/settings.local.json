@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(find . -type d \\\\\\( -name __pycache__ -o -name .pytest_cache \\\\\\) -exec rm -rf {} +)",
-      "Bash(powershell -Command \"[Environment]::SetEnvironmentVariable\\('PYTHONDONTWRITEBYTECODE', '1', 'User'\\)\")"
+      "Bash(powershell -Command \"[Environment]::SetEnvironmentVariable\\('PYTHONDONTWRITEBYTECODE', '1', 'User'\\)\")",
+      "Bash(rtk ls *)"
     ]
   }
 }
