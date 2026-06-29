@@ -22,7 +22,7 @@ from app.utils import load_latest_search_results
 from app.workflow.evidence import build_evidence_pack
 from app.workflow.router import route_from_state
 from app.workflow.state import WorkflowState, create_initial_state
-from app.workflow.trace import ProgressCallback, append_warning, run_traced_node
+from app.workflow.trace import NODE_CONTRACTS, ProgressCallback, append_warning, run_node
 
 
 def plan_node(state: WorkflowState) -> WorkflowState:
@@ -138,6 +138,66 @@ def evidence_pack_node(state: WorkflowState) -> WorkflowState:
     return state
 
 
+def local_video_analyze_node(state: WorkflowState) -> WorkflowState:
+    path = (state.get("plan") or {}).get("reference_video_path") or state.get("reference_video_path")
+    if not path:
+        raise ValueError("reference video route requires a video_analysis_brief.json path")
+    brief_path = Path(path)
+    brief = json.loads(brief_path.read_text(encoding="utf-8"))
+    state["reference_video_path"] = str(brief_path)
+    state["video_analysis_brief"] = brief
+    return state
+
+
+def video_pattern_extract_node(state: WorkflowState) -> WorkflowState:
+    brief = state.get("video_analysis_brief") or {}
+    source = brief.get("source") or {}
+    transcript = brief.get("transcript") or {}
+    structure = brief.get("structure_analysis") or {}
+    guidance = brief.get("replication_guidance") or {}
+    style = brief.get("style_profile") or {}
+    scenes = structure.get("scenes") or []
+    topic = guidance.get("topic") or source.get("title") or "参考视频"
+    scene_count = structure.get("total_scenes") or len(scenes)
+
+    state["trend_analysis"] = {
+        "top_topics": [topic],
+        "hot_emotions": guidance.get("emotions") or [],
+        "audience_pain_points": guidance.get("pain_points") or [],
+        "high_engagement_reasons": [],
+        "content_type_distribution": {"video": 1},
+        "summary": f"Analyzed reference video brief with {scene_count} scenes and {transcript.get('word_count', 0)} transcript words.",
+    }
+    state["pattern_analysis"] = {
+        "title_patterns": guidance.get("title_patterns") or ["reference-video result-first title"],
+        "opening_patterns": guidance.get("opening_patterns") or ["first 3 seconds show the conflict or result"],
+        "body_patterns": guidance.get("body_patterns") or ["scene sequence -> key action -> result proof"],
+        "visual_patterns": style.get("visual_patterns") or ["reuse the strongest keyframe framing and pacing"],
+        "interaction_patterns": guidance.get("interaction_patterns") or ["end with a low-friction remake prompt"],
+        "replicable_templates": guidance.get("replicable_templates") or [
+            f"{topic}: opening frame -> repeatable action steps -> differentiated result"
+        ],
+    }
+    state["evidence_pack"] = {
+        "run_id": state.get("run_id"),
+        "keyword": topic,
+        "item_count": 1,
+        "top_items": [
+            {
+                "id": "reference_video",
+                "title": topic,
+                "body_excerpt": transcript.get("full_text", "")[:500],
+                "metrics": {"total_engagement": 0},
+                "detail_status": "video_brief",
+            }
+        ],
+        "topic_candidates": [topic],
+        "data_quality": {"total_raw": 1, "total_clean": 1, "quality_score": 100 if scene_count else 60},
+    }
+    state["data_quality"] = state["evidence_pack"]["data_quality"]
+    return state
+
+
 def imitation_plan_node(state: WorkflowState) -> WorkflowState:
     state["imitation_plans"] = ImitationPlannerAgent().run(
         state.get("trend_analysis", {}),
@@ -192,34 +252,55 @@ def clean_items(raw_items: list[dict]) -> list[dict]:
 
 def run_workflow_legacy(user_query: str, output_dir: str | Path = "outputs/final_package") -> WorkflowState:
     state = create_initial_state(user_query)
-    state = run_traced_node(state, "plan", plan_node)
+    state = _run_workflow_node(state, "plan", plan_node)
     route = route_from_state(state)
     state["route"] = route
-    state = run_traced_node(state, "memory_load", memory_load_node)
-
-    if route == "full_pipeline_path":
-        state = run_traced_node(state, "collect", collector_node)
-        state = run_traced_node(state, "clean", cleaner_node)
-        state = run_traced_node(state, "store", storage_node)
-        state = run_traced_node(state, "trend_analyze", trend_analyze_node)
-        state = run_traced_node(state, "pattern_extract", pattern_extract_node)
-        state = run_traced_node(state, "evidence_pack", evidence_pack_node)
-        state = run_traced_node(state, "imitation_plan", imitation_plan_node)
-        state = run_traced_node(state, "review", review_node)
-        state = run_traced_node(state, "report", report_node, output_dir)
-        state = run_traced_node(state, "memory_write", memory_write_node)
+    if route == "reference_video_imitation_path":
+        state = _run_workflow_node(state, "local_video_analyze", local_video_analyze_node)
+        state = _run_workflow_node(state, "video_pattern_extract", video_pattern_extract_node)
+        state = _run_workflow_node(state, "imitation_plan", imitation_plan_node)
+        state = _run_workflow_node(state, "review", review_node)
+        state = _run_workflow_node(state, "report", report_node, output_dir)
         return trace_writer_node(state, output_dir)
 
-    state = run_traced_node(state, "load_latest_search_results", load_latest_search_results_node)
-    state = run_traced_node(state, "clean", cleaner_node)
-    state = run_traced_node(state, "trend_analyze", trend_analyze_node)
-    state = run_traced_node(state, "pattern_extract", pattern_extract_node)
-    state = run_traced_node(state, "evidence_pack", evidence_pack_node)
+    state = _run_workflow_node(state, "memory_load", memory_load_node)
+
+    if route == "full_pipeline_path":
+        state = _run_workflow_node(state, "collect", collector_node)
+        state = _run_workflow_node(state, "clean", cleaner_node)
+        state = _run_workflow_node(state, "store", storage_node)
+        state = _run_workflow_node(state, "trend_analyze", trend_analyze_node)
+        state = _run_workflow_node(state, "pattern_extract", pattern_extract_node)
+        state = _run_workflow_node(state, "evidence_pack", evidence_pack_node)
+        state = _run_workflow_node(state, "imitation_plan", imitation_plan_node)
+        state = _run_workflow_node(state, "review", review_node)
+        state = _run_workflow_node(state, "report", report_node, output_dir)
+        state = _run_workflow_node(state, "memory_write", memory_write_node)
+        return trace_writer_node(state, output_dir)
+
+    state = _run_workflow_node(state, "load_latest_search_results", load_latest_search_results_node)
+    state = _run_workflow_node(state, "clean", cleaner_node)
+    state = _run_workflow_node(state, "trend_analyze", trend_analyze_node)
+    state = _run_workflow_node(state, "pattern_extract", pattern_extract_node)
+    state = _run_workflow_node(state, "evidence_pack", evidence_pack_node)
     if route == "imitation_plan_path":
-        state = run_traced_node(state, "imitation_plan", imitation_plan_node)
-        state = run_traced_node(state, "review", review_node)
-    state = run_traced_node(state, "report", report_node, output_dir)
+        state = _run_workflow_node(state, "imitation_plan", imitation_plan_node)
+        state = _run_workflow_node(state, "review", review_node)
+    state = _run_workflow_node(state, "report", report_node, output_dir)
     return trace_writer_node(state, output_dir)
+
+
+def _run_workflow_node(state: WorkflowState, name: str, func, *args) -> WorkflowState:
+    contract = NODE_CONTRACTS.get(name, {})
+    return run_node(
+        state,
+        name,
+        func,
+        *args,
+        before=contract.get("before"),
+        after=contract.get("after"),
+        on_error=contract.get("on_error"),
+    )
 
 
 def run_workflow(

@@ -33,6 +33,8 @@ class WorkflowState(TypedDict, total=False):
     errors: list
     warnings: list
     memory_context: dict
+    reference_video_path: str
+    video_analysis_brief: dict
 
 
 def create_initial_state(user_query: str) -> WorkflowState:

@@ -18,3 +18,4 @@ class ExecutionPlan:
     need_imitation_planning: bool = False
     need_review: bool = False
     output_format: str = "markdown_report"
+    reference_video_path: str = ""

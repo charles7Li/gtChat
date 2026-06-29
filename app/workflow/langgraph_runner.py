@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Callable
 
@@ -9,6 +10,7 @@ from app.workflow.graph import (
     evidence_pack_node,
     imitation_plan_node,
     load_latest_search_results_node,
+    local_video_analyze_node,
     memory_load_node,
     memory_write_node,
     pattern_extract_node,
@@ -18,60 +20,11 @@ from app.workflow.graph import (
     storage_node,
     trace_writer_node,
     trend_analyze_node,
+    video_pattern_extract_node,
 )
 from app.workflow.router import route_from_state
 from app.workflow.state import WorkflowState, create_initial_state
-from app.workflow.trace import ProgressCallback, NodeHook, require_state_keys, run_node, warn_dict_missing_keys, warn_missing_outputs
-
-
-NODE_CONTRACTS: dict[str, dict[str, list[NodeHook]]] = {
-    "plan": {
-        "before": [require_state_keys("user_query")],
-        "after": [warn_missing_outputs("plan", "route", "keyword", "platform", "time_filter", "sort", "deep_limit")],
-    },
-    "route": {
-        "before": [require_state_keys("plan")],
-        "after": [warn_missing_outputs("route")],
-    },
-    "memory_load": {
-        "after": [warn_missing_outputs("memory_context"), warn_dict_missing_keys("memory_context", "index")],
-    },
-    "collect": {
-        "before": [require_state_keys("keyword", "sort", "deep_limit")],
-        "after": [warn_missing_outputs("raw_items")],
-    },
-    "load_latest_search_results": {
-        "after": [warn_missing_outputs("raw_items")],
-    },
-    "clean": {
-        "before": [require_state_keys("raw_items")],
-        "after": [warn_missing_outputs("clean_items", "dropped_items", "data_quality")],
-    },
-    "trend_analyze": {
-        "before": [require_state_keys("clean_items")],
-        "after": [warn_missing_outputs("trend_analysis"), warn_dict_missing_keys("trend_analysis", "top_topics", "summary")],
-    },
-    "pattern_extract": {
-        "before": [require_state_keys("clean_items", "trend_analysis")],
-        "after": [warn_missing_outputs("pattern_analysis"), warn_dict_missing_keys("pattern_analysis", "replicable_templates")],
-    },
-    "evidence_pack": {
-        "before": [require_state_keys("clean_items", "trend_analysis", "data_quality")],
-        "after": [warn_missing_outputs("evidence_pack"), warn_dict_missing_keys("evidence_pack", "top_items")],
-    },
-    "imitation_plan": {
-        "before": [require_state_keys("trend_analysis", "pattern_analysis", "evidence_pack")],
-        "after": [warn_missing_outputs("imitation_plans")],
-    },
-    "review": {
-        "before": [require_state_keys("imitation_plans")],
-        "after": [warn_missing_outputs("review_result"), warn_dict_missing_keys("review_result", "overall_score")],
-    },
-    "report": {
-        "before": [require_state_keys("trend_analysis", "pattern_analysis", "evidence_pack")],
-        "after": [warn_missing_outputs("final_report", "report_path", "manifest_path")],
-    },
-}
+from app.workflow.trace import NODE_CONTRACTS, ProgressCallback, run_node
 
 
 def langgraph_available() -> bool:
@@ -93,11 +46,13 @@ def build_langgraph_workflow(
     graph.add_node("route", _traced("route", _route_node, progress_callback=progress_callback))
     graph.add_node("memory_load", _traced("memory_load", memory_load_node, progress_callback=progress_callback))
     graph.add_node("collect", _traced("collect", collector_node, progress_callback=progress_callback))
+    graph.add_node("local_video_analyze", _traced("local_video_analyze", local_video_analyze_node, progress_callback=progress_callback))
     graph.add_node("load_latest_search_results", _traced("load_latest_search_results", load_latest_search_results_node, progress_callback=progress_callback))
     graph.add_node("clean", _traced("clean", cleaner_node, progress_callback=progress_callback))
     graph.add_node("store", _traced("store", storage_node, progress_callback=progress_callback))
     graph.add_node("trend_analyze", _traced("trend_analyze", trend_analyze_node, progress_callback=progress_callback))
     graph.add_node("pattern_extract", _traced("pattern_extract", pattern_extract_node, progress_callback=progress_callback))
+    graph.add_node("video_pattern_extract", _traced("video_pattern_extract", video_pattern_extract_node, progress_callback=progress_callback))
     graph.add_node("evidence_pack", _traced("evidence_pack", evidence_pack_node, progress_callback=progress_callback))
     graph.add_node("imitation_plan", _traced("imitation_plan", imitation_plan_node, progress_callback=progress_callback))
     graph.add_node("review", _traced("review", review_node, progress_callback=progress_callback))
@@ -107,7 +62,16 @@ def build_langgraph_workflow(
 
     graph.add_edge(START, "plan")
     graph.add_edge("plan", "route")
-    graph.add_edge("route", "memory_load")
+    graph.add_conditional_edges(
+        "route",
+        _after_route_selector,
+        {
+            "reference_video_imitation_path": "local_video_analyze",
+            "default": "memory_load",
+        },
+    )
+    graph.add_edge("local_video_analyze", "video_pattern_extract")
+    graph.add_edge("video_pattern_extract", "imitation_plan")
     graph.add_conditional_edges(
         "memory_load",
         _route_selector,
@@ -115,6 +79,7 @@ def build_langgraph_workflow(
             "full_pipeline_path": "collect",
             "imitation_plan_path": "load_latest_search_results",
             "trend_report_path": "load_latest_search_results",
+            "reference_video_imitation_path": "local_video_analyze",
         },
     )
 
@@ -162,8 +127,34 @@ def run_workflow_langgraph(
     progress_callback: ProgressCallback | None = None,
 ) -> WorkflowState:
     app = build_langgraph_workflow(output_dir, progress_callback=progress_callback)
-    result = app.invoke(create_initial_state(user_query))
+    config = _langsmith_run_config(user_query)
+    if config:
+        result = app.invoke(create_initial_state(user_query), config=config)
+    else:
+        result = app.invoke(create_initial_state(user_query))
     return result
+
+
+def _langsmith_run_config(user_query: str) -> dict | None:
+    tracing = os.getenv("LANGSMITH_TRACING") or os.getenv("LANGCHAIN_TRACING_V2")
+    if not tracing or tracing.lower() not in {"1", "true", "yes"}:
+        return None
+
+    project = os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT")
+    run_name = os.getenv("LANGSMITH_RUN_NAME") or os.getenv("LANGCHAIN_RUN_NAME") or "gtchat-langgraph-workflow"
+    metadata = {
+        "workflow": "gtchat",
+        "entrypoint": "langgraph",
+        "user_query": user_query[:200],
+    }
+    if project:
+        metadata["project"] = project
+
+    return {
+        "run_name": run_name,
+        "tags": ["gtchat", "langgraph"],
+        "metadata": metadata,
+    }
 
 
 def _traced(
@@ -194,6 +185,12 @@ def _route_node(state: WorkflowState) -> WorkflowState:
 
 def _route_selector(state: WorkflowState) -> str:
     return route_from_state(state)
+
+
+def _after_route_selector(state: WorkflowState) -> str:
+    if route_from_state(state) == "reference_video_imitation_path":
+        return "reference_video_imitation_path"
+    return "default"
 
 
 def _after_clean_selector(state: WorkflowState) -> str:
