@@ -1,0 +1,49 @@
+name: reference_video_imitation_path
+description: "Use a local video_analysis_brief.json to extract video patterns and generate imitation plans."
+allow_live_collect: false
+writes_memory: false
+external_services: []
+stages:
+  - name: plan
+    required_inputs: [user_query]
+    produces: [plan, route, keyword, reference_video_path]
+    quality_gates:
+      - route is reference_video_imitation_path
+      - reference_video_path is present
+  - name: route
+    required_inputs: [plan]
+    produces: [route]
+    quality_gates:
+      - route is reference_video_imitation_path
+  - name: local_video_analyze
+    required_inputs: [reference_video_path]
+    produces: [video_analysis_brief]
+    quality_gates:
+      - brief json is readable
+      - source metadata is present
+  - name: video_pattern_extract
+    required_inputs: [video_analysis_brief]
+    produces: [trend_analysis, pattern_analysis, evidence_pack, data_quality]
+    quality_gates:
+      - replicable_templates is present
+      - evidence_pack is present
+  - name: imitation_plan
+    required_inputs: [trend_analysis, pattern_analysis, evidence_pack]
+    produces: [imitation_plans]
+    quality_gates:
+      - imitation_plans is present
+  - name: review
+    required_inputs: [imitation_plans]
+    produces: [review_result]
+    quality_gates:
+      - overall_score is present
+  - name: report
+    required_inputs: [trend_analysis, pattern_analysis, evidence_pack]
+    produces: [final_report, report_path, manifest_path]
+    quality_gates:
+      - report artifacts are written
+  - name: trace
+    required_inputs: [trace_nodes]
+    produces: [agent_trace, trace_path]
+    quality_gates:
+      - agent_trace is written
