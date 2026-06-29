@@ -151,6 +151,67 @@ def warn_dict_missing_keys(state_key: str, *keys: str) -> NodeHook:
     return hook
 
 
+NODE_CONTRACTS: dict[str, dict[str, list[NodeHook]]] = {
+    "plan": {
+        "before": [require_state_keys("user_query")],
+        "after": [warn_missing_outputs("plan", "route", "keyword", "platform", "time_filter", "sort", "deep_limit")],
+    },
+    "route": {
+        "before": [require_state_keys("plan")],
+        "after": [warn_missing_outputs("route")],
+    },
+    "memory_load": {
+        "after": [warn_missing_outputs("memory_context"), warn_dict_missing_keys("memory_context", "index")],
+    },
+    "collect": {
+        "before": [require_state_keys("keyword", "sort", "deep_limit")],
+        "after": [warn_missing_outputs("raw_items")],
+    },
+    "load_latest_search_results": {
+        "after": [warn_missing_outputs("raw_items")],
+    },
+    "local_video_analyze": {
+        "before": [require_state_keys("plan")],
+        "after": [warn_missing_outputs("video_analysis_brief", "reference_video_path")],
+    },
+    "clean": {
+        "before": [require_state_keys("raw_items")],
+        "after": [warn_missing_outputs("clean_items", "dropped_items", "data_quality")],
+    },
+    "trend_analyze": {
+        "before": [require_state_keys("clean_items")],
+        "after": [warn_missing_outputs("trend_analysis"), warn_dict_missing_keys("trend_analysis", "top_topics", "summary")],
+    },
+    "pattern_extract": {
+        "before": [require_state_keys("clean_items", "trend_analysis")],
+        "after": [warn_missing_outputs("pattern_analysis"), warn_dict_missing_keys("pattern_analysis", "replicable_templates")],
+    },
+    "video_pattern_extract": {
+        "before": [require_state_keys("video_analysis_brief")],
+        "after": [
+            warn_missing_outputs("trend_analysis", "pattern_analysis", "evidence_pack", "data_quality"),
+            warn_dict_missing_keys("pattern_analysis", "replicable_templates"),
+        ],
+    },
+    "evidence_pack": {
+        "before": [require_state_keys("clean_items", "trend_analysis", "data_quality")],
+        "after": [warn_missing_outputs("evidence_pack"), warn_dict_missing_keys("evidence_pack", "top_items")],
+    },
+    "imitation_plan": {
+        "before": [require_state_keys("trend_analysis", "pattern_analysis", "evidence_pack")],
+        "after": [warn_missing_outputs("imitation_plans")],
+    },
+    "review": {
+        "before": [require_state_keys("imitation_plans")],
+        "after": [warn_missing_outputs("review_result"), warn_dict_missing_keys("review_result", "overall_score")],
+    },
+    "report": {
+        "before": [require_state_keys("trend_analysis", "pattern_analysis", "evidence_pack")],
+        "after": [warn_missing_outputs("final_report", "report_path", "manifest_path")],
+    },
+}
+
+
 def summarize_state(state: WorkflowState) -> dict:
     summary = {
         "route": state.get("route"),

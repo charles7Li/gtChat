@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.llm import LLMError, structured_llm_call
+from app.schemas.analysis import ReviewResult
 
 
 class ReviewAgent:
@@ -20,7 +21,7 @@ class ReviewAgent:
 
     def _try_llm_review(self, imitation_plans: list[dict]) -> dict:
         try:
-            result = structured_llm_call("review_agent", {"imitation_plans": imitation_plans[:5]})
+            result = structured_llm_call("review_agent", {"imitation_plans": imitation_plans[:5]}, ReviewResult)
         except LLMError:
             return {}
         return result if self._valid_review(result, len(imitation_plans)) else {}

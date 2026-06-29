@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.llm import LLMError, structured_llm_call
+from app.schemas.analysis import PatternExtractionResult
 
 
 class PatternExtractorAgent:
@@ -25,7 +26,7 @@ class PatternExtractorAgent:
             "trend_analysis": trend_analysis,
         }
         try:
-            result = structured_llm_call("pattern_extractor", payload)
+            result = structured_llm_call("pattern_extractor", payload, PatternExtractionResult)
         except LLMError:
             return {}
         return result if self._valid_patterns(result) else {}

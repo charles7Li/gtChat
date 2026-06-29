@@ -7,7 +7,9 @@ import urllib.error
 import urllib.request
 from contextvars import ContextVar, Token
 from dataclasses import asdict, is_dataclass
+from hashlib import sha256
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
@@ -43,16 +45,18 @@ def structured_llm_call(
     timeout_seconds: int | None = None,
 ) -> dict:
     """Call an OpenAI-compatible chat completions API and parse JSON output."""
+    started = perf_counter()
+    prompt_version = _prompt_version_from_file(prompt_name)
     if os.getenv("LLM_ENABLE", "").lower() not in {"1", "true", "yes"}:
         message = "LLM_ENABLE is not enabled"
-        _record_llm_event(prompt_name, "disabled", error=message)
+        _record_llm_event(prompt_name, "disabled", error=message, prompt_version=prompt_version, latency_ms=_elapsed_ms(started))
         raise LLMDisabledError(message)
 
     preset = os.getenv("LLM_PRESET", "").lower()
     api_key = _api_key_for_preset(preset)
     if not api_key:
         message = "LLM_API_KEY, OPENAI_API_KEY, or preset-specific API key is required"
-        _record_llm_event(prompt_name, "disabled", error=message)
+        _record_llm_event(prompt_name, "disabled", error=message, prompt_version=prompt_version, latency_ms=_elapsed_ms(started))
         raise LLMDisabledError(message)
 
     selected_model = model or os.getenv("LLM_MODEL", "gpt-4.1-mini")
@@ -62,6 +66,7 @@ def structured_llm_call(
 
     try:
         prompt = _load_prompt(prompt_name)
+        prompt_version = _prompt_version(prompt)
         if provider == "langchain":
             result = _call_langchain_chat_openai(
                 base_url=base_url,
@@ -73,7 +78,14 @@ def structured_llm_call(
             )
             _validate_mapping(result)
             validated = _validate_schema(result, schema)
-            _record_llm_event(prompt_name, "success", provider=provider, model=selected_model)
+            _record_llm_event(
+                prompt_name,
+                "success",
+                provider=provider,
+                model=selected_model,
+                prompt_version=prompt_version,
+                latency_ms=_elapsed_ms(started),
+            )
             return validated
 
         response = _post_chat_completion(
@@ -87,10 +99,26 @@ def structured_llm_call(
         result = _parse_json_response(response)
         _validate_mapping(result)
         validated = _validate_schema(result, schema)
-        _record_llm_event(prompt_name, "success", provider=provider, model=selected_model)
+        _record_llm_event(
+            prompt_name,
+            "success",
+            provider=provider,
+            model=selected_model,
+            prompt_version=prompt_version,
+            latency_ms=_elapsed_ms(started),
+            token_usage=_token_usage(response),
+        )
         return validated
     except LLMError as exc:
-        _record_llm_event(prompt_name, "failed", provider=provider, model=selected_model, error=str(exc))
+        _record_llm_event(
+            prompt_name,
+            "failed",
+            provider=provider,
+            model=selected_model,
+            error=str(exc),
+            prompt_version=prompt_version,
+            latency_ms=_elapsed_ms(started),
+        )
         raise
 
 
@@ -110,6 +138,21 @@ def _load_skill(prompt_name: str) -> str:
     if not skill_path.exists():
         return ""
     return skill_path.read_text(encoding="utf-8").strip()
+
+
+def _prompt_version(prompt: str) -> str:
+    return sha256(prompt.encode("utf-8")).hexdigest()[:12]
+
+
+def _prompt_version_from_file(prompt_name: str) -> str | None:
+    prompt_path = Path(__file__).resolve().parents[1] / "prompts" / f"{prompt_name}.md"
+    if not prompt_path.exists():
+        return None
+    prompt = prompt_path.read_text(encoding="utf-8")
+    skill = _load_skill(prompt_name)
+    if skill:
+        prompt = f"{prompt}\n\n# Node Skill\n{skill}"
+    return _prompt_version(prompt)
 
 
 def _api_key_for_preset(preset: str) -> str | None:
@@ -258,6 +301,15 @@ def _to_plain_dict(value: Any) -> dict:
     raise LLMError("Validated LLM output could not be converted to a dict")
 
 
+def _token_usage(response: dict) -> dict | None:
+    usage = response.get("usage")
+    return usage if isinstance(usage, dict) else None
+
+
+def _elapsed_ms(started: float) -> int:
+    return round((perf_counter() - started) * 1000)
+
+
 def _record_llm_event(
     prompt_name: str,
     status: str,
@@ -265,6 +317,9 @@ def _record_llm_event(
     provider: str | None = None,
     model: str | None = None,
     error: str | None = None,
+    prompt_version: str | None = None,
+    latency_ms: int | None = None,
+    token_usage: dict | None = None,
 ) -> None:
     events = _LLM_EVENTS.get()
     if events is None:
@@ -277,6 +332,12 @@ def _record_llm_event(
         event["provider"] = provider
     if model:
         event["model"] = model
+    if prompt_version:
+        event["prompt_version"] = prompt_version
+    if latency_ms is not None:
+        event["latency_ms"] = latency_ms
+    if token_usage:
+        event["token_usage"] = token_usage
     langsmith = _langsmith_context()
     if langsmith:
         event["langsmith"] = langsmith
