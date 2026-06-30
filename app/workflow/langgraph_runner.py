@@ -6,6 +6,7 @@ from typing import Callable
 
 from app.workflow.graph import (
     cleaner_node,
+    commercial_data_import_node,
     collector_node,
     evidence_pack_node,
     imitation_plan_node,
@@ -47,6 +48,7 @@ def build_langgraph_workflow(
     graph.add_node("memory_load", _traced("memory_load", memory_load_node, progress_callback=progress_callback))
     graph.add_node("collect", _traced("collect", collector_node, progress_callback=progress_callback))
     graph.add_node("local_video_analyze", _traced("local_video_analyze", local_video_analyze_node, progress_callback=progress_callback))
+    graph.add_node("commercial_data_import", _traced("commercial_data_import", commercial_data_import_node, progress_callback=progress_callback))
     graph.add_node("load_latest_search_results", _traced("load_latest_search_results", load_latest_search_results_node, progress_callback=progress_callback))
     graph.add_node("clean", _traced("clean", cleaner_node, progress_callback=progress_callback))
     graph.add_node("store", _traced("store", storage_node, progress_callback=progress_callback))
@@ -80,9 +82,12 @@ def build_langgraph_workflow(
             "imitation_plan_path": "load_latest_search_results",
             "trend_report_path": "load_latest_search_results",
             "reference_video_imitation_path": "local_video_analyze",
+            "commercial_data_analysis_path": "commercial_data_import",
+            "hotspot_auto_analysis_path": "load_latest_search_results",
         },
     )
 
+    graph.add_edge("commercial_data_import", "trace")
     graph.add_edge("collect", "clean")
     graph.add_edge("load_latest_search_results", "clean")
     graph.add_conditional_edges(
@@ -92,6 +97,7 @@ def build_langgraph_workflow(
             "full_pipeline_path": "store",
             "imitation_plan_path": "trend_analyze",
             "trend_report_path": "trend_analyze",
+            "hotspot_auto_analysis_path": "trend_analyze",
         },
     )
     graph.add_edge("store", "trend_analyze")
@@ -103,6 +109,7 @@ def build_langgraph_workflow(
         {
             "full_pipeline_path": "imitation_plan",
             "imitation_plan_path": "imitation_plan",
+            "hotspot_auto_analysis_path": "imitation_plan",
             "trend_report_path": "report",
         },
     )

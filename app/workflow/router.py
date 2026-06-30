@@ -1,4 +1,11 @@
-VALID_ROUTES = {"trend_report_path", "imitation_plan_path", "full_pipeline_path", "reference_video_imitation_path"}
+VALID_ROUTES = {
+    "trend_report_path",
+    "imitation_plan_path",
+    "full_pipeline_path",
+    "reference_video_imitation_path",
+    "commercial_data_analysis_path",
+    "hotspot_auto_analysis_path",
+}
 
 
 def route_from_state(state: dict) -> str:

@@ -1,0 +1,66 @@
+name: hotspot_auto_analysis_path
+description: "Dry-run route for hotspot-triggered analysis from prepared HotspotSignal payloads."
+allow_live_collect: false
+writes_memory: false
+external_services: []
+stages:
+  - name: plan
+    required_inputs: [user_query]
+    produces: [plan, route]
+    quality_gates:
+      - route is hotspot_auto_analysis_path
+  - name: route
+    required_inputs: [plan]
+    produces: [route]
+    quality_gates:
+      - route is hotspot_auto_analysis_path
+  - name: memory_load
+    required_inputs: [keyword]
+    produces: [memory_context]
+    quality_gates:
+      - memory_context is present
+  - name: load_latest_search_results
+    required_inputs: []
+    produces: [raw_items]
+    quality_gates:
+      - does not trigger live collection
+  - name: clean
+    required_inputs: [raw_items]
+    produces: [clean_items, dropped_items, data_quality]
+    quality_gates:
+      - data_quality is present
+  - name: trend_analyze
+    required_inputs: [clean_items]
+    produces: [trend_analysis]
+    quality_gates:
+      - trend_analysis summary is present
+  - name: pattern_extract
+    required_inputs: [clean_items, trend_analysis]
+    produces: [pattern_analysis]
+    quality_gates:
+      - replicable_templates is present
+  - name: evidence_pack
+    required_inputs: [clean_items, trend_analysis, data_quality]
+    produces: [evidence_pack]
+    quality_gates:
+      - top_items is present
+  - name: imitation_plan
+    required_inputs: [trend_analysis, pattern_analysis, evidence_pack]
+    produces: [imitation_plans]
+    quality_gates:
+      - imitation_plans is present
+  - name: review
+    required_inputs: [imitation_plans]
+    produces: [review_result]
+    quality_gates:
+      - overall_score is present
+  - name: report
+    required_inputs: [trend_analysis, pattern_analysis, evidence_pack]
+    produces: [final_report, report_path, manifest_path]
+    quality_gates:
+      - report artifacts are written
+  - name: trace
+    required_inputs: [trace_nodes]
+    produces: [agent_trace, trace_path]
+    quality_gates:
+      - agent_trace is written

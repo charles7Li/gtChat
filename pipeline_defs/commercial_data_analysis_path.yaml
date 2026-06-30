@@ -1,0 +1,33 @@
+name: commercial_data_analysis_path
+description: "Dry-run import path for commercial exports such as ChanMama before full report analysis."
+allow_live_collect: false
+writes_memory: false
+external_services: []
+stages:
+  - name: plan
+    required_inputs: [user_query]
+    produces: [plan, route]
+    quality_gates:
+      - route is commercial_data_analysis_path
+  - name: route
+    required_inputs: [plan]
+    produces: [route]
+    quality_gates:
+      - route is commercial_data_analysis_path
+  - name: memory_load
+    required_inputs: [keyword]
+    produces: [memory_context]
+    quality_gates:
+      - memory_context is present
+  - name: commercial_data_import
+    required_inputs: []
+    produces: [commercial_import_summary]
+    quality_gates:
+      - no live collection
+      - provenance is present
+      - import records are produced
+  - name: trace
+    required_inputs: [trace_nodes]
+    produces: [agent_trace, trace_path]
+    quality_gates:
+      - agent_trace is written
