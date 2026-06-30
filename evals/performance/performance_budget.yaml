@@ -1,0 +1,5 @@
+trend_report_path: 8000
+imitation_plan_path: 12000
+full_pipeline_path: 30000
+reference_video_imitation_path: 20000
+commercial_data_analysis_path: 5000

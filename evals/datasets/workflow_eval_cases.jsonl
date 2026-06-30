@@ -1,0 +1,4 @@
+{"case_id":"trend_report_dry_run","query":"分析宠物赛道趋势","route":"trend_report_path","requires_live":false}
+{"case_id":"imitation_plan_dry_run","query":"生成宠物仿拍选题","route":"imitation_plan_path","requires_live":false}
+{"case_id":"reference_video_dry_run","query":"基于参考视频 path=tests/_fixtures/video_analysis_brief.json 生成仿拍","route":"reference_video_imitation_path","requires_live":false}
+{"case_id":"commercial_data_dry_run","query":"分析蝉妈妈导出文件","route":"commercial_data_analysis_path","requires_live":false}
