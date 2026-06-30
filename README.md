@@ -1,113 +1,209 @@
-# gtChat Planner Workflow
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.11+-blue" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/framework-LangGraph-green" alt="LangGraph">
+  <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="License">
+</p>
 
-一个基于 LangGraph 的 Planner-driven Multi-Agent Workflow，用 agent 管道完成小红书内容趋势分析、爆款模式提取、仿拍选题生成、方案评审和 Markdown 报告输出。
+# gtChat
 
-当前升级保持轻量：不做复杂 Supervisor，不引入外部 memory 框架，不重构现有采集脚本。
+> Planner-driven multi-agent workflow for content commerce — from trend discovery to viral-ready briefs.
 
-## 升级迭代状态
+gtChat is a LangGraph-based agent pipeline that automates content strategy workflows: collect trending posts from Xiaohongshu and Douyin, analyze patterns, generate imitation briefs, review quality, and produce structured reports — all traceable and evaluable.
 
-- Iteration 1：`run_workflow` 已切换为 LangGraph `StateGraph` 编排，保留 `run_workflow_legacy` 作为手写顺序执行入口。
-- Iteration 2：LangGraph 节点统一进入 `run_node` hook pipeline，支持输入检查、输出检查、trace 摘要和错误记录。
-- LangChain：`LLM_PROVIDER=langchain` 可走 `langchain-openai`，并与默认 OpenAI-compatible 路径共享 JSON schema 校验。
+## Features
 
-## 功能
+- **Multi-route workflow** — 6 execution paths: trend report, imitation planning, full pipeline, reference video analysis, commercial data import, and hotspot auto-analysis
+- **Multi-source data** — Xiaohongshu (Playwright browser), Douyin search/hot-board (HTTP API), Chanmama export import, local video analysis
+- **Planner-driven routing** — natural language input → keyword extraction → route selection → full agent pipeline
+- **LLM-backed agents** with rule-based fallback — works without API keys, upgrades with `LLM_ENABLE=true`
+- **Unified trace pipeline** — every node records timing, LLM events, warnings, and errors to `agent_trace.json`
+- **Skill registry** — extensible local skill system with function and file-import adapters
+- **Monitor + notifications** — scheduled hotspot detection, judge/research sub-agents, webhook push
+- **Eval framework** — trace exporter, eval datasets, and automated eval runner
+- **Windows-friendly** — tested on Windows 11, Chromium auto-detection, PowerShell env support
 
-- `PlanAgent`：解析用户输入，生成结构化执行计划
-- `IntentRouter`：根据 `route` 选择执行路径
-- `TrendAnalyzerAgent`：统计热门主题、情绪、痛点和内容类型分布
-- `PatternExtractorAgent`：提取标题、正文、视觉和互动套路
-- `ImitationPlannerAgent`：生成 3 个可仿拍选题方案
-- `ReviewAgent`：对仿拍方案打分并给出修改建议
-- `ReportWriterAgent`：输出最终 Markdown 报告、manifest 和 agent trace
-- `SimpleMemory`：用本地文件保存轻量趋势、模式和评审反馈
+## Installation
 
-## 路由
+```bash
+git clone https://github.com/your-org/gtChat.git
+cd gtChat
 
-当前支持 3 条执行路径：
+pip install -e .
+pip install langgraph pydantic
 
-- `trend_report_path`：趋势分析报告
-- `imitation_plan_path`：仿拍选题策划
-- `full_pipeline_path`：采集、分析、仿拍、评审、报告完整流程
+# Optional: LLM support
+pip install langchain langchain-openai
 
-## 项目结构
+# Optional: Playwright for XHS collection
+pip install playwright
+playwright install chromium
+```
+
+## Quick Start
+
+```bash
+# Run tests (no network, no API keys required)
+python -m pytest tests -q
+
+# Trend analysis from cached data
+python -m app.cli "宠物用品趋势分析"
+
+# Imitation planning
+python -m app.cli "策划猫粮仿拍选题"
+
+# Full pipeline (collect → analyze → plan → report)
+python -m app.cli "从采集到报告全做一遍"
+
+# Analyze a reference video
+python -m app.cli "基于参考视频 path=C:\video.mp4 生成仿拍"
+```
+
+Output lands in `outputs/<run_id>/`:
+- `trend_report.md` — full analysis report
+- `manifest.json` — run metadata and source provenance
+- `agent_trace.json` — per-node timing, LLM events, performance summary
+
+## Routes
+
+gtChat uses a keyword-based planner to select one of six routes:
+
+| Route | Trigger | Description |
+| --- | --- | --- |
+| `trend_report_path` | 趋势, 分析, 报告 | Load cached data → trend & pattern analysis → report |
+| `imitation_plan_path` | 仿拍, 选题, 策划 | Load → clean → trend → pattern → imitation plans → review → report |
+| `full_pipeline_path` | 从采集到, 全流程 | Live collect → clean → analyze → plan → review → report |
+| `reference_video_imitation_path` | 参考视频, video brief | Local video analysis → pattern extraction → imitation → report |
+| `commercial_data_analysis_path` | commercial, chanmama, 蝉妈妈 | Import commercial exports → normalize → analyze → report |
+| `hotspot_auto_analysis_path` | hotspot, 热点自动 | Load hotspot signals → content analysis → imitation → report |
+
+Route definitions: [`pipeline_defs/`](pipeline_defs/)
+
+## Data Sources
+
+| Platform | Capability | Method |
+| --- | --- | --- |
+| Xiaohongshu | Search, detail, filter by sort/time | Playwright browser + persistent profile |
+| Douyin | Search, detail, hot board, keyword import | HTTP API with cookie auth |
+| Chanmama | Creator/ product export import | CSV/JSON folder scan |
+| Local video | Scene detection, transcription, keyframes | `app/video/` analysis pipeline |
+
+### Xiaohongshu Login
+
+```bash
+# Opens browser → scan QR → press Enter → profile saved
+python -m app.collectors.xiaohongshu_minimal --login
+
+# Search
+python -m app.collectors.xiaohongshu_minimal --keyword "猫粮" --limit 20
+```
+
+### Douyin Setup
+
+```bash
+# Check auth status
+python -m app.collectors.douyin_minimal --check-login
+
+# Requires endpoints:
+#   DOUYIN_SEARCH_ENDPOINT, DOUYIN_DETAIL_ENDPOINT, DOUYIN_HOT_BOARD_ENDPOINT
+python -m app.collectors.douyin_minimal --hot-board --limit 20
+```
+
+## LLM Configuration
+
+```bash
+# Enable LLM agents (optional — rule-based fallback works without it)
+export LLM_ENABLE=true
+export LLM_BASE_URL=https://api.openai.com/v1
+export LLM_API_KEY=your_key
+export LLM_MODEL=gpt-4.1-mini
+```
+
+Or use the PackyAPI preset:
+```bash
+export LLM_ENABLE=true
+export LLM_PRESET=packyapi
+export PACKY_API_KEY=your_key
+export LLM_MODEL=gpt-4.1-mini
+```
+
+## Live Checks
+
+```bash
+# Dry-run: validate config without network calls
+python -m app.live_checks
+
+# Live: test douyin endpoints + notification webhook
+python -m app.live_checks --allow-live --keyword "猫粮"
+```
+
+## Monitor
+
+```bash
+# Single detection → judge → research tick
+python -m app.monitor run --once
+
+# Watch mode (every N seconds)
+python -m app.monitor run --interval 600
+```
+
+## Evals
+
+```bash
+# Export workflow traces to eval dataset
+python -m evals.exporters.local_trace_exporter --input outputs/
+
+# Run eval report
+python -m evals.runners.run_deepeval_from_trace --dataset evals/datasets/workflow_eval_cases.jsonl
+```
+
+## Architecture
+
+```
+User Query
+    │
+    ▼
+PlanAgent ──► Router ──► Node Pipeline ──► Report + Trace
+    │              │
+    │    ┌─────────┼─────────┐
+    │    │         │         │
+    ▼    ▼         ▼         ▼
+ Collect → Clean → Trend → Pattern → Imitation → Review → Report
+(XHS/DY)   │                            │            │
+           │                            │            │
+     Data Quality              Evidence Pack    Agent Trace
+                                            (timing, LLM, perf)
+```
+
+Every node runs through `run_node()` — a unified hook pipeline:
+- `before`: validate required state keys
+- `run`: execute node logic
+- `after`: warn on missing outputs
+- `on_error`: record structured error
+
+## Project Structure
 
 ```text
 app/
-  agents/      # 各类规则版 agent
-  cleaner/     # 内容清洗、去重、数据质量统计
-  llm/         # 可选 LLM 结构化调用边界
-  memory/      # 轻量文件记忆
-  schemas/     # 计划、分析、报告结构
-  utils/       # 计数、时间、JSON 加载工具
-  workflow/    # LangGraph 编排、路由、trace、evidence pack
-docs/
-  plan.md      # 原始实现方案
-  upgrade_design.md
-tests/
-  test_workflow.py
+  agents/          Plan, trend, pattern, imitation, review, report, judge, research
+  cleaner/         Dedup, normalize, data quality stats
+  collectors/      XHS (Playwright), Douyin (HTTP API)
+  data_sources/    Chanmama CSV/JSON import hub
+  llm/             Structured LLM calls with schema validation + rule fallback
+  memory/          SimpleMemory (file), SQLiteMemory (keyword-indexed)
+  monitor/         Auth gate, signal detection, research loop
+  notifications/   Digest generation, webhook push
+  queue/           SQLite job queue (enqueue / claim / done / failed)
+  skills/          Registry + LocalFunction / FileImport adapters
+  video/           Scene detection, frame sampling, transcription, local analysis
+  workflow/        LangGraph graph, router, trace, evidence, performance, contracts
+
+config/            Skill definitions
+pipeline_defs/     Route manifests (*.yaml)
+evals/             Trace exporter, eval runner, datasets
+tests/             Workflow, collector, skill, memory, eval tests
+outputs/           Reports, traces, manifests, video briefs
 ```
 
-## 快速开始
+## License
 
-安装测试依赖后运行：
-
-```bash
-pip install langgraph langchain langchain-openai pydantic
-python -m pytest tests -q
-```
-
-在 Python 中调用 workflow：
-
-```python
-from app.workflow import run_workflow
-
-state = run_workflow("从采集到报告全做一遍")
-print(state["report_path"])
-```
-
-默认使用规则版 agent。启用 `ImitationPlannerAgent` 的 LLM 增强：
-
-```bash
-set LLM_ENABLE=true
-set OPENAI_API_KEY=your_api_key
-set LLM_MODEL=gpt-4.1-mini
-```
-
-也可以配置兼容 OpenAI Chat Completions 的服务：
-
-```bash
-set LLM_BASE_URL=https://api.openai.com/v1
-set LLM_API_KEY=your_api_key
-```
-
-使用 LangChain provider：
-
-```bash
-set LLM_PROVIDER=langchain
-```
-
-默认输出目录：
-
-```text
-outputs/final_package/
-  trend_report.md
-  manifest.json
-  agent_trace.json
-```
-
-## PackyAPI
-
-PackyAPI is OpenAI-compatible. Use the preset below to set the official base URL:
-
-```powershell
-$env:LLM_ENABLE="true"
-$env:LLM_PRESET="packyapi"
-$env:PACKY_API_KEY="your_packyapi_key"
-$env:LLM_MODEL="gpt-4.1-mini"
-```
-
-Override the endpoint only when needed:
-
-```powershell
-$env:LLM_BASE_URL="https://api-slb.packyapi.com/v1"
-```
+MIT
