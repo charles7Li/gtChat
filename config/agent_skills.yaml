@@ -1,0 +1,4 @@
+default:
+  - chanmama_import
+  - local_video_analyze
+  - report_export
