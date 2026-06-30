@@ -16,11 +16,13 @@ from app.memory import SimpleMemory
 from app.schemas.analysis import PatternExtractionResult, ReviewResult
 from app.workflow.evidence import build_evidence_pack
 from app.workflow.graph import clean_items, run_workflow, trace_writer_node
+from app.workflow.graph import commercial_data_import_node
 from app.workflow.langgraph_runner import (
     build_langgraph_workflow,
     langgraph_available,
     run_workflow_langgraph,
 )
+from app.workflow.performance import build_performance_summary
 from app.workflow.route_manifest import load_route_manifests
 from app.workflow.router import route_from_state
 from app.workflow.trace import NODE_CONTRACTS, require_state_keys, run_node, warn_dict_missing_keys, warn_missing_outputs
@@ -53,6 +55,17 @@ def test_plan_agent_routes_reference_video_imitation():
     plan = PlanAgent().run(r"基于参考视频 path=C:\tmp\video_analysis_brief.json 生成仿拍")
     assert plan["route"] == "reference_video_imitation_path"
     assert plan["reference_video_path"] == r"C:\tmp\video_analysis_brief.json"
+
+
+def test_plan_agent_routes_commercial_data_analysis():
+    plan = PlanAgent().run("分析蝉妈妈导出文件")
+    assert plan["route"] == "commercial_data_analysis_path"
+
+
+def test_plan_agent_accepts_reference_video_file_path():
+    plan = PlanAgent().run(r"基于参考视频 path=C:\tmp\reference.mp4 生成仿拍")
+    assert plan["route"] == "reference_video_imitation_path"
+    assert plan["reference_video_path"] == r"C:\tmp\reference.mp4"
 
 
 def test_cleaner_parses_wan_count():
@@ -347,6 +360,7 @@ def test_router_returns_route_from_state():
     assert route_from_state({"route": "imitation_plan_path"}) == "imitation_plan_path"
     assert route_from_state({"route": "full_pipeline_path"}) == "full_pipeline_path"
     assert route_from_state({"route": "reference_video_imitation_path"}) == "reference_video_imitation_path"
+    assert route_from_state({"route": "commercial_data_analysis_path"}) == "commercial_data_analysis_path"
     assert route_from_state({"route": "unknown"}) == "trend_report_path"
 
 
@@ -354,7 +368,13 @@ def test_route_manifests_match_current_langgraph_paths():
     manifests = load_route_manifests()
     runner_nodes = set(NODE_CONTRACTS) | {"store", "memory_write", "trace"}
 
-    assert set(manifests) == {"trend_report_path", "imitation_plan_path", "full_pipeline_path", "reference_video_imitation_path"}
+    assert set(manifests) == {
+        "trend_report_path",
+        "imitation_plan_path",
+        "full_pipeline_path",
+        "reference_video_imitation_path",
+        "commercial_data_analysis_path",
+    }
     assert manifests["trend_report_path"].stage_names == [
         "plan",
         "route",
@@ -407,10 +427,30 @@ def test_route_manifests_match_current_langgraph_paths():
         "report",
         "trace",
     ]
+    assert manifests["commercial_data_analysis_path"].stage_names == [
+        "plan",
+        "route",
+        "memory_load",
+        "commercial_data_import",
+        "trace",
+    ]
     for manifest in manifests.values():
         assert set(manifest.stage_names) <= runner_nodes
         if not manifest.allow_live_collect:
             assert "collect" not in manifest.stage_names
+
+
+def test_commercial_data_import_node_dry_run(tmp_path):
+    root = tmp_path / "chanmama"
+    pending = root / "pending"
+    pending.mkdir(parents=True)
+    (pending / "creators.csv").write_text("creator_id,name\nc1,A\n", encoding="utf-8")
+
+    state = commercial_data_import_node({"route": "commercial_data_analysis_path"}, path=root)
+
+    assert state["commercial_import_summary"]["source"] == "chanmama"
+    assert state["commercial_import_summary"]["record_count"] == 1
+    assert (root / "processed" / "creators.csv").exists()
 
 
 def test_report_writer_generates_trend_report():
@@ -427,6 +467,7 @@ def test_report_writer_generates_trend_report():
             "evidence_pack": {"top_items": []},
             "trend_analysis": {"summary": "趋势总结", "top_topics": [], "content_type_distribution": {}},
             "pattern_analysis": {"title_patterns": [], "replicable_templates": []},
+            "commercial_import_summary": {"source": "chanmama", "record_count": 1, "provenance": [{"source_type": "chanmama_export"}]},
         }
         result = ReportWriterAgent(output_dir).run(state)
         latest_report_path = output_dir / "trend_report.md"
@@ -444,8 +485,10 @@ def test_report_writer_generates_trend_report():
         assert report_text.startswith("# 20")
         assert report_text == timestamped_text
         assert "## 2. 数据质量概览" in report_text
+        assert "数据来源：chanmama / commercial_import / records=1" in report_text
         assert manifest["report"] == str(report_path)
         assert manifest["latest_report"] == str(latest_report_path)
+        assert manifest["source_summary"]["sources"][0]["source"] == "chanmama"
         assert result["evidence_path"] == str(evidence_path)
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
@@ -545,7 +588,8 @@ def test_trace_writer_generates_agent_trace():
             "route": "imitation_plan_path",
             "review_result": {"overall_score": 86},
             "data_quality": {"quality_score": 90},
-            "trace_nodes": [{"name": "plan", "status": "success"}],
+            "raw_items": [{"id": "1", "platform": "douyin", "provenance": {"source_type": "endpoint"}}],
+            "trace_nodes": [{"name": "plan", "status": "success", "duration_ms": 5}],
         }
         trace_writer_node(state, output_dir)
         trace_path = output_dir / "agent_trace.json"
@@ -556,8 +600,28 @@ def test_trace_writer_generates_agent_trace():
         assert trace["run_id"] == "run-1"
         assert trace["nodes"][0]["name"] == "plan"
         assert trace["data_quality"]["quality_score"] == 90
+        assert trace["source_summary"]["sources"][0]["source"] == "douyin"
+        assert trace["performance"]["workflow_total_ms"] == 5
+        assert trace["performance"]["budget_passed"] is True
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_build_performance_summary_counts_nodes_and_llm_events():
+    summary = build_performance_summary(
+        [
+            {"name": "plan", "status": "success", "duration_ms": 3, "llm_events": [{"latency_ms": 2}]},
+            {"name": "report", "status": "success", "duration_ms": 8},
+        ],
+        route="trend_report_path",
+        budget_ms=10,
+    )
+
+    assert summary["workflow_total_ms"] == 11
+    assert summary["llm_total_ms"] == 2
+    assert summary["slowest_node"]["name"] == "report"
+    assert summary["budget_ms"] == 10
+    assert summary["budget_passed"] is False
 
 
 def test_run_node_hooks_validate_inputs_and_warn_outputs():
@@ -784,6 +848,43 @@ def test_run_workflow_reference_video_imitation_path(monkeypatch):
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
         shutil.rmtree(brief_dir, ignore_errors=True)
+
+
+def test_run_workflow_reference_video_file_path_generates_brief(monkeypatch):
+    output_dir = ARTIFACT_DIR / "reference_video_file_workflow"
+    video_dir = ARTIFACT_DIR / "reference_video_file_input"
+    video_path = video_dir / "reference.mp4"
+    shutil.rmtree(output_dir, ignore_errors=True)
+    shutil.rmtree(video_dir, ignore_errors=True)
+    video_dir.mkdir(parents=True, exist_ok=True)
+    video_path.write_text("fake", encoding="utf-8")
+
+    def fake_analyze_local_video(path, *, output_dir, **kwargs):
+        brief = {
+            "source": {"local_path": str(path), "title": "宠物洗护视频", "duration_seconds": 10},
+            "transcript": {"full_text": "洗护前后对比。", "segments": [], "word_count": 7, "language": "zh"},
+            "structure_analysis": {"total_scenes": 1, "scenes": []},
+            "keyframes": ["keyframes/frame_0000.jpg"],
+            "style_profile": {"visual_patterns": ["before after frame"]},
+            "replication_guidance": {"topic": "宠物洗护"},
+            "_analysis_meta": {"output_path": str(Path(output_dir) / "video_analysis_brief.json")},
+        }
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(output_dir) / "video_analysis_brief.json").write_text(json.dumps(brief, ensure_ascii=False), encoding="utf-8")
+        return brief
+
+    monkeypatch.setattr("app.workflow.graph.analyze_local_video", fake_analyze_local_video)
+    monkeypatch.delenv("LLM_ENABLE", raising=False)
+    try:
+        state = run_workflow(f"基于参考视频 path={video_path} 生成仿拍", output_dir)
+
+        assert state["route"] == "reference_video_imitation_path"
+        assert state["reference_video_source_path"] == str(video_path)
+        assert state["reference_video_path"].endswith("video_analysis_brief.json")
+        assert state["trend_analysis"]["top_topics"] == ["宠物洗护"]
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        shutil.rmtree(video_dir, ignore_errors=True)
 
 
 @pytest.mark.parametrize(

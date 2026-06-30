@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.llm import LLMError, structured_llm_call
+from app.source_summary import build_source_summary
 
 
 class ReportWriterAgent:
@@ -18,6 +19,7 @@ class ReportWriterAgent:
         title_stamp = created_at.strftime("%Y-%m-%d %H:%M:%S")
         filename_stamp = created_at.strftime("%Y%m%d-%H%M%S")
         brief = _brief_from_state(state)
+        source_summary = build_source_summary(state)
         report = self._try_llm_report(state) or self._render_markdown(state)
         report = _stamp_report_title(report, title_stamp, brief)
         report_path = self.output_dir / f"{filename_stamp}_{_safe_filename_part(brief)}_trend_report.md"
@@ -40,6 +42,7 @@ class ReportWriterAgent:
             "route": state.get("route"),
             "keyword": (state.get("plan") or {}).get("keyword", state.get("keyword")),
             "data_quality": state.get("data_quality", {}),
+            "source_summary": source_summary,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -84,6 +87,7 @@ class ReportWriterAgent:
         dropped = state.get("dropped_items") or []
         evidence = state.get("evidence_pack") or {}
         warnings = state.get("warnings") or []
+        source_summary = build_source_summary(state)
         score = review.get("overall_score")
         review_note = "\n\n> 建议修改：当前方案评分偏低，需补充差异化和执行细节。" if score and score < 75 else ""
 
@@ -96,6 +100,7 @@ class ReportWriterAgent:
                 f"- 路由：{state.get('route', '')}",
                 f"- 关键词：{plan.get('keyword', state.get('keyword', '宠物'))}",
                 f"- Run ID：{state.get('run_id', '')}",
+                self._render_sources(source_summary),
                 "",
                 "## 2. 数据质量概览",
                 f"- 原始内容数：{data_quality.get('total_raw', len(state.get('raw_items', [])))}",
@@ -167,6 +172,17 @@ class ReportWriterAgent:
         lines = ["- 本次运行存在以下降级或风险："]
         for warning in warnings:
             lines.append(f"- [{warning.get('code', 'warning')}] {warning.get('message', '')}")
+        return "\n".join(lines)
+
+    def _render_sources(self, source_summary: dict) -> str:
+        sources = source_summary.get("sources") or []
+        if not sources:
+            return "- 数据来源：本地历史搜索结果或 fixture"
+        lines = []
+        for source in sources:
+            lines.append(
+                f"- 数据来源：{source.get('source', '')} / {source.get('source_type', '')} / records={source.get('record_count', 0)}"
+            )
         return "\n".join(lines)
 
 

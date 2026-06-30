@@ -34,7 +34,9 @@ class WorkflowState(TypedDict, total=False):
     warnings: list
     memory_context: dict
     reference_video_path: str
+    reference_video_source_path: str
     video_analysis_brief: dict
+    commercial_import_summary: dict
 
 
 def create_initial_state(user_query: str) -> WorkflowState:

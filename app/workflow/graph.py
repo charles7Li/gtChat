@@ -17,10 +17,14 @@ from app.agents import (
 from app.cleaner import clean_items as clean_notes
 from app.cleaner import clean_items_with_metadata
 from app.collectors import collect_xiaohongshu
+from app.data_sources import run_data_source_import
 from app.memory import SimpleMemory
 from app.utils import load_latest_search_results
+from app.video import analyze_local_video
 from app.workflow.evidence import build_evidence_pack
+from app.workflow.performance import build_performance_summary
 from app.workflow.router import route_from_state
+from app.source_summary import build_source_summary
 from app.workflow.state import WorkflowState, create_initial_state
 from app.workflow.trace import NODE_CONTRACTS, ProgressCallback, append_warning, run_node
 
@@ -142,8 +146,15 @@ def local_video_analyze_node(state: WorkflowState) -> WorkflowState:
     path = (state.get("plan") or {}).get("reference_video_path") or state.get("reference_video_path")
     if not path:
         raise ValueError("reference video route requires a video_analysis_brief.json path")
-    brief_path = Path(path)
-    brief = json.loads(brief_path.read_text(encoding="utf-8"))
+    source_path = Path(path)
+    if source_path.suffix.lower() == ".json":
+        brief_path = source_path
+        brief = json.loads(brief_path.read_text(encoding="utf-8"))
+    else:
+        output_dir = Path("outputs/video_analysis") / str(state.get("run_id", "reference_video"))
+        brief = analyze_local_video(source_path, output_dir=output_dir)
+        brief_path = Path((brief.get("_analysis_meta") or {}).get("output_path") or output_dir / "video_analysis_brief.json")
+        state["reference_video_source_path"] = str(source_path)
     state["reference_video_path"] = str(brief_path)
     state["video_analysis_brief"] = brief
     return state
@@ -198,6 +209,11 @@ def video_pattern_extract_node(state: WorkflowState) -> WorkflowState:
     return state
 
 
+def commercial_data_import_node(state: WorkflowState, source: str = "chanmama", path: str | Path | None = None) -> WorkflowState:
+    state["commercial_import_summary"] = run_data_source_import(source, path=path or "watched_imports/chanmama")
+    return state
+
+
 def imitation_plan_node(state: WorkflowState) -> WorkflowState:
     state["imitation_plans"] = ImitationPlannerAgent().run(
         state.get("trend_analysis", {}),
@@ -234,11 +250,13 @@ def trace_writer_node(state: WorkflowState, output_dir: str | Path = "outputs/fi
         "execution_path": _execution_path(route),
         "nodes": state.get("trace_nodes", []),
         "data_quality": state.get("data_quality", {}),
+        "source_summary": build_source_summary(state),
         "final_score": (state.get("review_result") or {}).get("overall_score"),
         "warnings": state.get("warnings", []),
         "errors": state.get("errors", []),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    trace["performance"] = build_performance_summary(trace["nodes"], route=route)
     state["agent_trace"] = trace
     trace_path = directory / "agent_trace.json"
     trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
