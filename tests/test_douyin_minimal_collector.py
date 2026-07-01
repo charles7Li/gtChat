@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from app.collectors.douyin_minimal import (
@@ -7,6 +9,7 @@ from app.collectors.douyin_minimal import (
     douyin_hot_item_to_signal,
     get_douyin_detail,
     import_douyin_official_keywords,
+    login_douyin,
     load_douyin_cookies,
     normalize_douyin_content_item,
     normalize_douyin_hot_item,
@@ -30,6 +33,55 @@ def test_load_douyin_cookies_reads_file(tmp_path):
 
     assert load_douyin_cookies(cookie_path) == "[{\"name\":\"sessionid\",\"value\":\"abc\"}]"
     assert check_douyin_login(cookie_path)["status"] == "ok"
+
+
+def test_login_douyin_saves_browser_cookies_without_network(tmp_path):
+    cookie_path = tmp_path / "default.cookies.json"
+    profile_dir = tmp_path / "browser"
+    seen = {}
+
+    class FakePage:
+        def goto(self, url):
+            seen["url"] = url
+
+    class FakeContext:
+        pages = [FakePage()]
+
+        def cookies(self):
+            return [{"name": "sessionid", "value": "abc"}]
+
+        def close(self):
+            seen["closed"] = True
+
+    class FakeChromium:
+        def launch_persistent_context(self, user_data_dir, headless):
+            seen["profile"] = user_data_dir
+            seen["headless"] = headless
+            return FakeContext()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    result = login_douyin(
+        cookie_path=cookie_path,
+        profile_dir=profile_dir,
+        login_url="https://douyin.test/",
+        playwright_factory=lambda: FakePlaywright(),
+        input_func=lambda prompt: seen.setdefault("prompt", prompt),
+    )
+
+    assert result == {"status": "ok", "cookie_path": str(cookie_path), "cookie_count": 1}
+    assert json.loads(cookie_path.read_text(encoding="utf-8")) == [{"name": "sessionid", "value": "abc"}]
+    assert seen["url"] == "https://douyin.test/"
+    assert seen["profile"] == str(profile_dir)
+    assert seen["headless"] is False
+    assert seen["closed"] is True
 
 
 def test_normalize_douyin_item_handles_search_and_detail_shape():

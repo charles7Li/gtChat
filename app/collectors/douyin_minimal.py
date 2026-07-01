@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib import parse, request
 
 DEFAULT_COOKIE_PATH = Path(".profiles") / "douyin" / "default.cookies.json"
+DEFAULT_DOUYIN_PROFILE_DIR = Path(".profiles") / "douyin" / "browser"
 SEARCH_ENDPOINT_ENV = "DOUYIN_SEARCH_ENDPOINT"
 DETAIL_ENDPOINT_ENV = "DOUYIN_DETAIL_ENDPOINT"
 HOT_BOARD_ENDPOINT_ENV = "DOUYIN_HOT_BOARD_ENDPOINT"
@@ -28,6 +29,30 @@ def check_douyin_login(cookie_path: str | Path = DEFAULT_COOKIE_PATH) -> dict:
     if not path.read_text(encoding="utf-8").strip():
         return {"status": "auth_required", "reason": "cookies_empty", "cookie_path": str(path)}
     return {"status": "ok", "cookie_path": str(path)}
+
+
+def login_douyin(
+    *,
+    cookie_path: str | Path = DEFAULT_COOKIE_PATH,
+    profile_dir: str | Path = DEFAULT_DOUYIN_PROFILE_DIR,
+    login_url: str = "https://www.douyin.com/",
+    playwright_factory=None,
+    input_func=input,
+) -> dict:
+    factory = playwright_factory or _sync_playwright
+    cookie_file = Path(cookie_path)
+    profile = Path(profile_dir)
+    cookie_file.parent.mkdir(parents=True, exist_ok=True)
+    profile.mkdir(parents=True, exist_ok=True)
+    with factory() as playwright:
+        context = playwright.chromium.launch_persistent_context(str(profile), headless=False)
+        page = context.pages[0] if getattr(context, "pages", []) else context.new_page()
+        page.goto(login_url)
+        input_func("Scan Douyin QR code in the opened browser, then press Enter...")
+        cookies = context.cookies()
+        cookie_file.write_text(json.dumps(cookies, ensure_ascii=False, indent=2), encoding="utf-8")
+        context.close()
+    return {"status": "ok", "cookie_path": str(cookie_file), "cookie_count": len(cookies)}
 
 
 def validate_douyin_live_config(cookie_path: str | Path = DEFAULT_COOKIE_PATH) -> dict:
@@ -228,12 +253,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--cookie-path", default=str(DEFAULT_COOKIE_PATH))
     parser.add_argument("--check-login", action="store_true")
+    parser.add_argument("--login", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--hot-board", action="store_true")
     args = parser.parse_args(argv)
 
     if args.dry_run:
         print(json.dumps(validate_douyin_live_config(args.cookie_path), ensure_ascii=False))
+        return 0
+    if args.login:
+        print(json.dumps(login_douyin(cookie_path=args.cookie_path), ensure_ascii=False))
         return 0
     if args.check_login:
         print(json.dumps(check_douyin_login(args.cookie_path), ensure_ascii=False))
@@ -258,6 +287,14 @@ def _required_endpoint(env_name: str) -> str:
     if not endpoint:
         raise RuntimeError(f"{env_name} is required for live Douyin collection")
     return endpoint
+
+
+def _sync_playwright():
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError("playwright is required for Douyin login") from exc
+    return sync_playwright()
 
 
 def _fetch_json(endpoint: str, params: dict, cookie_path: str | Path) -> dict:
