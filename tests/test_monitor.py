@@ -1,6 +1,7 @@
 import json
 
-from app.monitor import AuthGate, SignalDetector, process_one_research_job, run_monitor_tick
+import app.workflow
+from app.monitor import AuthGate, SignalDetector, process_one_hotspot_analysis_job, process_one_research_job, run_background_loop, run_background_once, run_monitor_tick
 from app.queue import SQLiteQueue
 
 
@@ -82,3 +83,75 @@ def test_research_worker_turns_accepted_signal_into_research_request(tmp_path):
     assert next_job["payload"]["max_iterations"] == 1
     assert len(next_job["payload"]["strategy"]["queries"]) == 3
     assert json.loads(events[-1])["event_type"] == "research_decision"
+
+
+def test_background_once_enqueues_and_processes_hotspot_analysis(tmp_path, monkeypatch):
+    config_path = tmp_path / "monitor.json"
+    signals_path = tmp_path / "signals.json"
+    queue_db = tmp_path / "events.db"
+    state_dir = tmp_path / "state"
+    config_path.write_text(
+        json.dumps(
+            {
+                "job_id": "job-1",
+                "name": "pet monitor",
+                "platforms": ["douyin_hot_board"],
+                "keywords": ["pet"],
+                "rule": {"min_heat_score": 80},
+            }
+        ),
+        encoding="utf-8",
+    )
+    signals_path.write_text(
+        json.dumps({"signals": [{"signal_id": "s1", "source": "douyin_hot_board", "keyword": "pet", "heat_score": 90}]}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(app.workflow, "run_workflow", lambda query, output_dir: {"report_path": str(output_dir / "report.md"), "trace_path": str(output_dir / "trace.json")})
+
+    result = run_background_once(config_path=config_path, signals_path=signals_path, queue_db=queue_db, state_dir=state_dir, output_dir=tmp_path / "out")
+    events = [json.loads(line) for line in (state_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    assert result["status"] == "triggered"
+    assert result["analysis"][0]["status"] == "done"
+    assert SQLiteQueue(queue_db).get(result["queued_job_ids"][0])["status"] == "done"
+    assert events[-1]["event_type"] == "background_run"
+
+
+def test_hotspot_analysis_worker_is_idle_without_job(tmp_path):
+    result = process_one_hotspot_analysis_job(queue_db=tmp_path / "events.db", state_dir=tmp_path / "state")
+
+    assert result == {"status": "idle"}
+
+
+def test_background_loop_uses_config_paths(tmp_path, monkeypatch):
+    config_path = tmp_path / "monitor.json"
+    signals_path = tmp_path / "signals.json"
+    queue_db = tmp_path / "events.db"
+    state_dir = tmp_path / "state"
+    output_dir = tmp_path / "out"
+    signals_path.write_text(
+        json.dumps({"signals": [{"signal_id": "s1", "source": "douyin_hot_board", "keyword": "pet", "heat_score": 90}]}),
+        encoding="utf-8",
+    )
+    config_path.write_text(
+        json.dumps(
+            {
+                "job_id": "job-1",
+                "name": "pet monitor",
+                "platforms": ["douyin_hot_board"],
+                "keywords": ["pet"],
+                "signals_path": str(signals_path),
+                "output_dir": str(output_dir),
+                "interval_seconds": 1,
+                "rule": {"min_heat_score": 80},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app.workflow, "run_workflow", lambda query, output_dir: {"report_path": str(output_dir / "report.md"), "trace_path": str(output_dir / "trace.json")})
+
+    result = run_background_loop(config_path=config_path, queue_db=queue_db, state_dir=state_dir, max_runs=1)
+
+    assert result[0]["status"] == "triggered"
+    assert result[0]["analysis"][0]["report_path"].startswith(str(output_dir))

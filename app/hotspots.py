@@ -13,6 +13,16 @@ class HotspotRule:
     required_sources: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class MonitorJobConfig:
+    job_id: str
+    name: str
+    platforms: tuple[str, ...] = ()
+    keywords: tuple[str, ...] = ()
+    allow_live: bool = False
+    rule: HotspotRule = HotspotRule()
+
+
 def evaluate_hotspot_signal(signal: dict, rule: HotspotRule) -> dict:
     reasons = []
     if rule.required_sources and signal.get("source") not in rule.required_sources:
@@ -40,6 +50,20 @@ def build_hotspot_analysis_payload(signal: dict, evaluation: dict) -> dict:
     }
 
 
+def run_hotspot_monitor_once(config: MonitorJobConfig, signals: list[dict]) -> dict:
+    pairs = [(signal, evaluate_hotspot_signal(signal, config.rule)) for signal in signals if _matches_config(signal, config)]
+    payloads = [build_hotspot_analysis_payload(signal, evaluation) for signal, evaluation in pairs if evaluation["triggered"]]
+    return {
+        "run_id": f"{config.job_id}:{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+        "job_id": config.job_id,
+        "status": "triggered" if payloads else "skipped",
+        "signals_found": len(pairs),
+        "triggered_analysis": bool(payloads),
+        "analysis_payloads": payloads,
+        "warnings": [] if not config.allow_live else ["allow_live ignored by dry-run monitor"],
+    }
+
+
 def _result(triggered: bool, signal: dict, rule: HotspotRule, reasons: list[str]) -> dict:
     return {
         "triggered": triggered,
@@ -48,6 +72,14 @@ def _result(triggered: bool, signal: dict, rule: HotspotRule, reasons: list[str]
         "rule": asdict(rule),
         "reasons": reasons,
     }
+
+
+def _matches_config(signal: dict, config: MonitorJobConfig) -> bool:
+    if config.platforms and signal.get("source") not in config.platforms:
+        return False
+    if config.keywords and signal.get("keyword") not in config.keywords:
+        return False
+    return True
 
 
 def _float(value) -> float:

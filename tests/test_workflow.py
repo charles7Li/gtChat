@@ -12,6 +12,7 @@ from app.agents import ImitationPlannerAgent, PatternExtractorAgent, PlanAgent, 
 from app.cleaner import clean_items_with_metadata
 from app.llm import LLMError, structured_llm_call
 from app.llm.structured_call import _load_prompt, _load_skill
+from app.hotspots import HotspotRule, MonitorJobConfig, build_hotspot_analysis_payload, evaluate_hotspot_signal, run_hotspot_monitor_once
 from app.memory import SimpleMemory
 from app.schemas.analysis import PatternExtractionResult, ReviewResult
 from app.workflow.evidence import build_evidence_pack
@@ -60,6 +61,11 @@ def test_plan_agent_routes_reference_video_imitation():
 def test_plan_agent_routes_commercial_data_analysis():
     plan = PlanAgent().run("分析蝉妈妈导出文件")
     assert plan["route"] == "commercial_data_analysis_path"
+
+
+def test_plan_agent_routes_hotspot_auto_analysis():
+    plan = PlanAgent().run("热点自动分析宠物趋势")
+    assert plan["route"] == "hotspot_auto_analysis_path"
 
 
 def test_plan_agent_accepts_reference_video_file_path():
@@ -361,6 +367,7 @@ def test_router_returns_route_from_state():
     assert route_from_state({"route": "full_pipeline_path"}) == "full_pipeline_path"
     assert route_from_state({"route": "reference_video_imitation_path"}) == "reference_video_imitation_path"
     assert route_from_state({"route": "commercial_data_analysis_path"}) == "commercial_data_analysis_path"
+    assert route_from_state({"route": "hotspot_auto_analysis_path"}) == "hotspot_auto_analysis_path"
     assert route_from_state({"route": "unknown"}) == "trend_report_path"
 
 
@@ -374,6 +381,7 @@ def test_route_manifests_match_current_langgraph_paths():
         "full_pipeline_path",
         "reference_video_imitation_path",
         "commercial_data_analysis_path",
+        "hotspot_auto_analysis_path",
     }
     assert manifests["trend_report_path"].stage_names == [
         "plan",
@@ -434,6 +442,20 @@ def test_route_manifests_match_current_langgraph_paths():
         "commercial_data_import",
         "trace",
     ]
+    assert manifests["hotspot_auto_analysis_path"].stage_names == [
+        "plan",
+        "route",
+        "memory_load",
+        "load_latest_search_results",
+        "clean",
+        "trend_analyze",
+        "pattern_extract",
+        "evidence_pack",
+        "imitation_plan",
+        "review",
+        "report",
+        "trace",
+    ]
     for manifest in manifests.values():
         assert set(manifest.stage_names) <= runner_nodes
         if not manifest.allow_live_collect:
@@ -451,6 +473,50 @@ def test_commercial_data_import_node_dry_run(tmp_path):
     assert state["commercial_import_summary"]["source"] == "chanmama"
     assert state["commercial_import_summary"]["record_count"] == 1
     assert (root / "processed" / "creators.csv").exists()
+
+
+def test_hotspot_rule_builds_auto_analysis_payload():
+    signal = {"signal_id": "s1", "source": "douyin_hot_board", "keyword": "pet", "rank": 3, "heat_score": 88}
+
+    evaluation = evaluate_hotspot_signal(signal, HotspotRule(min_heat_score=80, min_rank=5, required_sources=("douyin_hot_board",)))
+    payload = build_hotspot_analysis_payload(signal, evaluation)
+
+    assert evaluation["triggered"] is True
+    assert "heat_score >= 80" in evaluation["reasons"]
+    assert "rank <= 5" in evaluation["reasons"]
+    assert payload["route"] == "hotspot_auto_analysis_path"
+    assert payload["keyword"] == "pet"
+    assert payload["source"] == "douyin_hot_board"
+
+
+def test_hotspot_rule_rejects_disallowed_source():
+    evaluation = evaluate_hotspot_signal({"source": "xhs", "keyword": "pet", "heat_score": 99}, HotspotRule(min_heat_score=80, required_sources=("douyin_hot_board",)))
+
+    assert evaluation["triggered"] is False
+    assert evaluation["reasons"] == ["source xhs not allowed"]
+
+
+def test_run_hotspot_monitor_once_builds_payloads_without_live():
+    config = MonitorJobConfig(
+        job_id="job-1",
+        name="pet monitor",
+        platforms=("douyin_hot_board",),
+        keywords=("pet",),
+        allow_live=True,
+        rule=HotspotRule(min_heat_score=80),
+    )
+    signals = [
+        {"signal_id": "s1", "source": "douyin_hot_board", "keyword": "pet", "heat_score": 90},
+        {"signal_id": "s2", "source": "douyin_hot_board", "keyword": "other", "heat_score": 99},
+    ]
+
+    result = run_hotspot_monitor_once(config, signals)
+
+    assert result["status"] == "triggered"
+    assert result["signals_found"] == 1
+    assert result["triggered_analysis"] is True
+    assert result["analysis_payloads"][0]["route"] == "hotspot_auto_analysis_path"
+    assert result["warnings"] == ["allow_live ignored by dry-run monitor"]
 
 
 def test_report_writer_generates_trend_report():

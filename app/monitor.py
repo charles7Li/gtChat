@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from app.agents import JudgeSubAgent, ResearchPlannerSubAgent, SearchStrategySubAgent, VerifierSubAgent
+from app.hotspots import HotspotRule, MonitorJobConfig, run_hotspot_monitor_once
 from app.queue import SQLiteQueue
 
 
@@ -168,6 +170,100 @@ def process_one_research_job(*, queue_db: str | Path = "events.db", state_dir: s
         return {"status": "failed", "job_id": job["id"], "error": str(exc)}
 
 
+def run_background_once(
+    *,
+    config_path: str | Path,
+    signals_path: str | Path | None = None,
+    queue_db: str | Path = "events.db",
+    state_dir: str | Path = "monitor_state",
+    output_dir: str | Path | None = None,
+) -> dict:
+    queue = SQLiteQueue(queue_db)
+    config_data = _load_monitor_config_data(config_path)
+    config = _monitor_config_from_data(config_data)
+    signals = signals_path or config_data.get("signals_path")
+    if not signals:
+        raise ValueError("signals_path is required in config or --signals")
+    target_output_dir = Path(output_dir or config_data.get("output_dir") or "outputs/hotspot")
+    result = run_hotspot_monitor_once(config, _load_signals(signals))
+    job_ids = []
+    for payload in result["analysis_payloads"]:
+        job_ids.append(
+            queue.enqueue(
+                "hotspot_analysis_requested",
+                payload,
+                dedupe_key=f"{config.job_id}:{payload.get('source')}:{payload.get('keyword')}:{payload.get('hotspot_signal', {}).get('signal_id')}",
+            )
+        )
+    analysis_results = [
+        process_one_hotspot_analysis_job(queue_db=queue_db, state_dir=state_dir, output_dir=target_output_dir)
+        for _ in job_ids
+    ]
+    _append_monitor_record(
+        state_dir,
+        "background_run",
+        {"job_id": config.job_id, "status": result["status"], "queued_job_ids": job_ids, "analysis_results": analysis_results},
+    )
+    return {"status": result["status"], "queued_job_ids": job_ids, "monitor": result, "analysis": analysis_results}
+
+
+def process_one_hotspot_analysis_job(
+    *,
+    queue_db: str | Path = "events.db",
+    state_dir: str | Path = "monitor_state",
+    output_dir: str | Path = "outputs/hotspot",
+) -> dict:
+    queue = SQLiteQueue(queue_db)
+    job = queue.claim_next(["hotspot_analysis_requested"])
+    if job is None:
+        return {"status": "idle"}
+
+    payload = job["payload"]
+    try:
+        from app.workflow import run_workflow
+
+        keyword = payload.get("keyword") or payload.get("topic") or "热点"
+        state = run_workflow(f"热点自动分析 {keyword}", Path(output_dir) / job["id"])
+        queue.mark_done(job["id"])
+        result = {"status": "done", "job_id": job["id"], "report_path": state.get("report_path"), "trace_path": state.get("trace_path")}
+        _append_monitor_record(state_dir, "hotspot_analysis_done", result)
+        return result
+    except Exception as exc:
+        queue.mark_failed(job["id"], str(exc))
+        _append_monitor_record(state_dir, "hotspot_analysis_failed", {"job_id": job["id"], "error": str(exc)})
+        return {"status": "failed", "job_id": job["id"], "error": str(exc)}
+
+
+def run_background_loop(
+    *,
+    config_path: str | Path,
+    signals_path: str | Path | None = None,
+    queue_db: str | Path = "events.db",
+    state_dir: str | Path = "monitor_state",
+    output_dir: str | Path | None = None,
+    interval_seconds: float | None = None,
+    max_runs: int | None = None,
+) -> list[dict]:
+    config_data = _load_monitor_config_data(config_path)
+    interval = interval_seconds if interval_seconds is not None else float(config_data.get("interval_seconds") or 60)
+    results = []
+    runs = 0
+    while max_runs is None or runs < max_runs:
+        results.append(
+            run_background_once(
+                config_path=config_path,
+                signals_path=signals_path,
+                queue_db=queue_db,
+                state_dir=state_dir,
+                output_dir=output_dir,
+            )
+        )
+        runs += 1
+        if max_runs is None or runs < max_runs:
+            time.sleep(interval)
+    return results
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -182,6 +278,24 @@ def main(argv: list[str] | None = None) -> int:
     worker_parser = subparsers.add_parser("worker-once")
     worker_parser.add_argument("--queue-db", default="events.db")
     worker_parser.add_argument("--state-dir", default="monitor_state")
+    hotspot_parser = subparsers.add_parser("hotspot-analysis-once")
+    hotspot_parser.add_argument("--queue-db", default="events.db")
+    hotspot_parser.add_argument("--state-dir", default="monitor_state")
+    hotspot_parser.add_argument("--output-dir", default="outputs/hotspot")
+    background_parser = subparsers.add_parser("background-once")
+    background_parser.add_argument("--config", required=True)
+    background_parser.add_argument("--signals")
+    background_parser.add_argument("--queue-db", default="events.db")
+    background_parser.add_argument("--state-dir", default="monitor_state")
+    background_parser.add_argument("--output-dir")
+    loop_parser = subparsers.add_parser("background-loop")
+    loop_parser.add_argument("--config", required=True)
+    loop_parser.add_argument("--signals")
+    loop_parser.add_argument("--queue-db", default="events.db")
+    loop_parser.add_argument("--state-dir", default="monitor_state")
+    loop_parser.add_argument("--output-dir")
+    loop_parser.add_argument("--interval-seconds", type=float)
+    loop_parser.add_argument("--max-runs", type=int)
     args = parser.parse_args(argv)
 
     if args.command == "run":
@@ -200,6 +314,32 @@ def main(argv: list[str] | None = None) -> int:
         result = process_one_research_job(queue_db=args.queue_db, state_dir=args.state_dir)
         print(json.dumps(result, ensure_ascii=False))
         return 0
+    if args.command == "hotspot-analysis-once":
+        result = process_one_hotspot_analysis_job(queue_db=args.queue_db, state_dir=args.state_dir, output_dir=args.output_dir)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    if args.command == "background-once":
+        result = run_background_once(
+            config_path=args.config,
+            signals_path=args.signals,
+            queue_db=args.queue_db,
+            state_dir=args.state_dir,
+            output_dir=args.output_dir,
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    if args.command == "background-loop":
+        result = run_background_loop(
+            config_path=args.config,
+            signals_path=args.signals,
+            queue_db=args.queue_db,
+            state_dir=args.state_dir,
+            output_dir=args.output_dir,
+            interval_seconds=args.interval_seconds,
+            max_runs=args.max_runs,
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
     return 1
 
 
@@ -209,6 +349,33 @@ def _load_items(path: str | Path) -> list[dict]:
         return data
     if isinstance(data, dict):
         for key in ("items", "notes", "data", "results"):
+            if isinstance(data.get(key), list):
+                return data[key]
+    return []
+
+
+def _load_monitor_config_data(path: str | Path) -> dict:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _monitor_config_from_data(data: dict) -> MonitorJobConfig:
+    rule = HotspotRule(**(data.get("rule") or {}))
+    return MonitorJobConfig(
+        job_id=str(data["job_id"]),
+        name=str(data.get("name") or data["job_id"]),
+        platforms=tuple(data.get("platforms") or ()),
+        keywords=tuple(data.get("keywords") or ()),
+        allow_live=bool(data.get("allow_live", False)),
+        rule=rule,
+    )
+
+
+def _load_signals(path: str | Path) -> list[dict]:
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("signals", "items", "data", "results"):
             if isinstance(data.get(key), list):
                 return data[key]
     return []
