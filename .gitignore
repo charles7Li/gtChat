@@ -17,7 +17,17 @@ env/
 # Local runtime outputs
 /outputs/
 /memory/
+/uploads/
+/monitor_state/
+/.profiles/
+/.tmp/
+/.xhs-profile/
+/.playwright-browsers/
 /tests/_artifacts/
+/tests/_tmp_pytest*/
+node_modules/
+dist/
+*.tsbuildinfo
 
 # Local environment and editor files
 .env
@@ -28,6 +38,10 @@ env/
 # OS files
 .DS_Store
 Thumbs.db
+*.lnk
+
+# Local transfer/export bundles
+/docs.zip
 docs/local_environment.md
 docs/xiaohongshu-search-filter.md
 docs/upgrade/00-master-plan.md
@@ -47,3 +61,18 @@ docs/upgrade/13-xiaohongshu-collector-login-upgrade.md
 docs/upgrade/14-application-modes-and-subagents.md
 docs/upgrade/15-sqlite-event-queue.md
 docs/upgrade/99-windows-exe-packaging.md
+docs/upgrade/16-douyin-data-source-upgrade.md
+docs/upgrade/17-dual-entry-application-design.md
+docs/upgrade/18-scheduled-hotspot-monitor.md
+docs/upgrade/19-chanmama-folder-auto-import.md
+docs/upgrade/20-evaluation-system.md
+docs/upgrade/21-performance-eval.md
+docs/upgrade/22-memory-2.md
+docs/upgrade/23-skill-registry.md
+docs/upgrade/24-douyin-login-upgrade.md
+docs/upgrade/25-user-web-frontend.md
+docs/upgrade/26-user-web-frontend.md
+docs/gtchat-v3-codex-implementation-plan.md
+docs/project-status.md
+local_run_commands.md
+resource/社交网络.mp4

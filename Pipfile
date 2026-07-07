@@ -10,6 +10,8 @@ langchain-openai = "*"
 langsmith = "*"
 pydantic = "==2.12.4"
 playwright = "==1.60.0"
+fastapi = "*"
+uvicorn = "*"
 
 [dev-packages]
 pytest = "==8.4.2"

@@ -13,6 +13,13 @@ DEFAULT_DOUYIN_PROFILE_DIR = Path(".profiles") / "douyin" / "browser"
 SEARCH_ENDPOINT_ENV = "DOUYIN_SEARCH_ENDPOINT"
 DETAIL_ENDPOINT_ENV = "DOUYIN_DETAIL_ENDPOINT"
 HOT_BOARD_ENDPOINT_ENV = "DOUYIN_HOT_BOARD_ENDPOINT"
+DOUYIN_BROWSER_EXECUTABLE_ENV = "DOUYIN_BROWSER_EXECUTABLE"
+DEFAULT_BROWSER_EXECUTABLES = (
+    Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+    Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+    Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
+    Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+)
 
 
 def load_douyin_cookies(cookie_path: str | Path = DEFAULT_COOKIE_PATH) -> str:
@@ -36,6 +43,7 @@ def login_douyin(
     cookie_path: str | Path = DEFAULT_COOKIE_PATH,
     profile_dir: str | Path = DEFAULT_DOUYIN_PROFILE_DIR,
     login_url: str = "https://www.douyin.com/",
+    browser_executable_path: str | Path | None = None,
     playwright_factory=None,
     input_func=input,
 ) -> dict:
@@ -45,7 +53,14 @@ def login_douyin(
     cookie_file.parent.mkdir(parents=True, exist_ok=True)
     profile.mkdir(parents=True, exist_ok=True)
     with factory() as playwright:
-        context = playwright.chromium.launch_persistent_context(str(profile), headless=False)
+        executable = _browser_executable_path(browser_executable_path)
+        launch_kwargs = {"headless": False}
+        if executable:
+            launch_kwargs["executable_path"] = str(executable)
+        try:
+            context = playwright.chromium.launch_persistent_context(str(profile), **launch_kwargs)
+        except TypeError:
+            context = playwright.chromium.launch_persistent_context(str(profile), headless=False)
         page = context.pages[0] if getattr(context, "pages", []) else context.new_page()
         page.goto(login_url)
         input_func("Scan Douyin QR code in the opened browser, then press Enter...")
@@ -254,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cookie-path", default=str(DEFAULT_COOKIE_PATH))
     parser.add_argument("--check-login", action="store_true")
     parser.add_argument("--login", action="store_true")
+    parser.add_argument("--browser-executable-path", default="")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--hot-board", action="store_true")
     args = parser.parse_args(argv)
@@ -262,7 +278,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(validate_douyin_live_config(args.cookie_path), ensure_ascii=False))
         return 0
     if args.login:
-        print(json.dumps(login_douyin(cookie_path=args.cookie_path), ensure_ascii=False))
+        print(
+            json.dumps(
+                login_douyin(cookie_path=args.cookie_path, browser_executable_path=args.browser_executable_path or None),
+                ensure_ascii=False,
+            )
+        )
         return 0
     if args.check_login:
         print(json.dumps(check_douyin_login(args.cookie_path), ensure_ascii=False))
@@ -295,6 +316,18 @@ def _sync_playwright():
     except ImportError as exc:
         raise RuntimeError("playwright is required for Douyin login") from exc
     return sync_playwright()
+
+
+def _browser_executable_path(browser_executable_path: str | Path | None = None) -> Path | None:
+    configured = browser_executable_path or os.getenv(DOUYIN_BROWSER_EXECUTABLE_ENV, "")
+    if configured:
+        path = Path(configured)
+        if path.exists():
+            return path
+    for path in DEFAULT_BROWSER_EXECUTABLES:
+        if path.exists():
+            return path
+    return None
 
 
 def _fetch_json(endpoint: str, params: dict, cookie_path: str | Path) -> dict:
