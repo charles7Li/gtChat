@@ -9,7 +9,7 @@ from app.workflow import run_workflow
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the gtChat agent workflow.")
+    parser = argparse.ArgumentParser(description="Run the Mochi Scout agent workflow.")
     parser.add_argument("query", help="User query for the workflow")
     parser.add_argument("--output-dir", default="outputs/final_package", help="Where to write report and trace files")
     parser.add_argument("--env-file", default=".env", help="Local env file to load before running")

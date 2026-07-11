@@ -334,7 +334,7 @@ def _fetch_json(endpoint: str, params: dict, cookie_path: str | Path) -> dict:
     query = parse.urlencode({key: value for key, value in params.items() if value not in (None, "")})
     separator = "&" if "?" in endpoint else "?"
     url = f"{endpoint}{separator}{query}" if query else endpoint
-    req = request.Request(url, headers={"Cookie": _cookie_header(load_douyin_cookies(cookie_path)), "User-Agent": "gtChat/1.0"})
+    req = request.Request(url, headers={"Cookie": _cookie_header(load_douyin_cookies(cookie_path)), "User-Agent": "MochiScout/1.0"})
     with request.urlopen(req, timeout=20) as response:  # noqa: S310 - user-configured collector endpoint
         return json.loads(response.read().decode("utf-8"))
 

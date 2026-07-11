@@ -148,9 +148,9 @@ def _langsmith_run_config(user_query: str) -> dict | None:
         return None
 
     project = os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT")
-    run_name = os.getenv("LANGSMITH_RUN_NAME") or os.getenv("LANGCHAIN_RUN_NAME") or "gtchat-langgraph-workflow"
+    run_name = os.getenv("LANGSMITH_RUN_NAME") or os.getenv("LANGCHAIN_RUN_NAME") or "mochi-scout-langgraph-workflow"
     metadata = {
-        "workflow": "gtchat",
+        "workflow": "mochi-scout",
         "entrypoint": "langgraph",
         "user_query": user_query[:200],
     }
@@ -159,7 +159,7 @@ def _langsmith_run_config(user_query: str) -> dict | None:
 
     return {
         "run_name": run_name,
-        "tags": ["gtchat", "langgraph"],
+        "tags": ["mochi-scout", "langgraph"],
         "metadata": metadata,
     }
 

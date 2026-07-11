@@ -763,7 +763,7 @@ def test_run_node_records_successful_llm_event(monkeypatch):
     monkeypatch.setenv("LLM_ENABLE", "true")
     monkeypatch.setenv("LLM_API_KEY", "fake-key")
     monkeypatch.setenv("LLM_MODEL", "fake-model")
-    monkeypatch.setenv("LANGSMITH_PROJECT", "gtchat-dev")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "mochi-scout-dev")
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
     monkeypatch.setenv("LANGSMITH_API_KEY", "secret")
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
@@ -779,7 +779,7 @@ def test_run_node_records_successful_llm_event(monkeypatch):
     assert event["prompt_version"]
     assert isinstance(event["latency_ms"], int)
     assert event["token_usage"] == {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
-    assert event["langsmith"] == {"tracing": "true", "project": "gtchat-dev"}
+    assert event["langsmith"] == {"tracing": "true", "project": "mochi-scout-dev"}
     assert "secret" not in str(event)
 
 
@@ -836,7 +836,7 @@ def test_langgraph_runner_passes_langsmith_config_when_enabled(monkeypatch):
             return state
 
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
-    monkeypatch.setenv("LANGSMITH_PROJECT", "gtchat-test")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "mochi-scout-test")
     monkeypatch.setenv("LANGSMITH_RUN_NAME", "custom-run")
     monkeypatch.setattr("app.workflow.langgraph_runner.build_langgraph_workflow", lambda *args, **kwargs: FakeGraphApp())
 
@@ -844,8 +844,8 @@ def test_langgraph_runner_passes_langsmith_config_when_enabled(monkeypatch):
 
     assert state["user_query"] == "生成仿拍选题"
     assert seen["config"]["run_name"] == "custom-run"
-    assert seen["config"]["tags"] == ["gtchat", "langgraph"]
-    assert seen["config"]["metadata"]["project"] == "gtchat-test"
+    assert seen["config"]["tags"] == ["mochi-scout", "langgraph"]
+    assert seen["config"]["metadata"]["project"] == "mochi-scout-test"
     assert seen["config"]["metadata"]["entrypoint"] == "langgraph"
 
 

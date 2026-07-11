@@ -4,11 +4,11 @@
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="License">
 </p>
 
-# gtChat
+# Mochi Scout
 
 > Planner-driven multi-agent workflow for content commerce — from trend discovery to viral-ready briefs.
 
-gtChat is a LangGraph-based agent pipeline that automates content strategy workflows: collect trending posts from Xiaohongshu and Douyin, analyze patterns, generate imitation briefs, review quality, and produce structured reports — all traceable and evaluable.
+Mochi Scout is a LangGraph-based agent pipeline that automates content strategy workflows: collect trending posts from Xiaohongshu and Douyin, analyze patterns, generate imitation briefs, review quality, and produce structured reports — all traceable and evaluable.
 
 ## Features
 
@@ -25,8 +25,8 @@ gtChat is a LangGraph-based agent pipeline that automates content strategy workf
 ## Installation
 
 ```bash
-git clone https://github.com/your-org/gtChat.git
-cd gtChat
+git clone https://github.com/your-org/mochi-scout.git
+cd mochi-scout
 
 pip install -e .
 pip install langgraph pydantic
@@ -65,7 +65,7 @@ Output lands in `outputs/<run_id>/`:
 
 ## Routes
 
-gtChat uses a keyword-based planner to select one of six routes:
+Mochi Scout uses a keyword-based planner to select one of six routes:
 
 | Route | Trigger | Description |
 | --- | --- | --- |

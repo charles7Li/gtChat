@@ -36,14 +36,14 @@ def run_live_checks(
         result["live_results"]["douyin"] = {"status": "skipped", "reason": "not_ready"}
 
     if checks["notification"]["status"] == "ready":
-        result["live_results"]["notification"] = send_notification({"messages": ["gtChat live check"], "status": "live_check"})
+        result["live_results"]["notification"] = send_notification({"messages": ["Mochi Scout live check"], "status": "live_check"})
     else:
         result["live_results"]["notification"] = {"status": "skipped", "reason": "not_ready"}
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run gtChat live integration checks. Defaults to dry-run.")
+    parser = argparse.ArgumentParser(description="Run Mochi Scout live integration checks. Defaults to dry-run.")
     parser.add_argument("--allow-live", action="store_true", help="Actually call configured Douyin endpoints and webhook.")
     parser.add_argument("--keyword", default="pet")
     parser.add_argument("--limit", type=int, default=1)
