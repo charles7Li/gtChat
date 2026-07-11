@@ -1,5 +1,13 @@
 import type { ChatRun, MonitorJob, UploadAsset } from "./types";
 
+export type Platform = "xiaohongshu" | "douyin";
+export type LoginState = {
+  platform: Platform;
+  status: "saved" | "auth_required" | "invalid";
+  cookie_count: number;
+  updated_at: string | null;
+};
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) {
@@ -62,5 +70,15 @@ export const api = {
   },
   digest() {
     return request<Record<string, unknown>>("/api/monitor/digest");
+  },
+  authStatus() {
+    return request<Record<Platform, LoginState>>("/api/auth/status");
+  },
+  saveAuthState(platform: Platform, cookies: Record<string, unknown>[]) {
+    return request<LoginState>(`/api/auth/${platform}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cookies }),
+    });
   },
 };

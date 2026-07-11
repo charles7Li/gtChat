@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from app.agents.plan_agent import PlanAgent
+from app.collectors.douyin_minimal import DEFAULT_COOKIE_PATH as DOUYIN_COOKIE_PATH
 from app.data_sources import import_chanmama_file, run_data_source_import
 from app.monitor import run_background_once, run_monitor_tick
 from app.notifications import build_monitor_digest
@@ -22,6 +23,7 @@ RUNS_DIR = Path("outputs/web_runs")
 UPLOADS_DIR = Path("uploads")
 MONITOR_DIR = Path("monitor_jobs")
 REPORT_ROOT = Path("outputs")
+XHS_COOKIE_PATH = Path(".profiles/xiaohongshu/default.cookies.json")
 
 
 class ChatRunRequest(BaseModel):
@@ -82,8 +84,12 @@ class MonitorJobRequest(BaseModel):
     output_dir: str = "outputs/hotspot"
 
 
+class LoginStateRequest(BaseModel):
+    cookies: list[dict[str, Any]] = Field(min_length=1)
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="gtChat Web API")
+    app = FastAPI(title="Mochi Scout Web API")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -186,6 +192,21 @@ def create_app() -> FastAPI:
     @app.get("/api/monitor/digest")
     def monitor_digest(state_dir: str = "monitor_state", limit: int = 20) -> dict[str, Any]:
         return build_monitor_digest(state_dir, limit=limit)
+
+    @app.get("/api/auth/status")
+    def auth_status() -> dict[str, Any]:
+        return {
+            "xiaohongshu": _login_state_summary("xiaohongshu", XHS_COOKIE_PATH),
+            "douyin": _login_state_summary("douyin", DOUYIN_COOKIE_PATH),
+        }
+
+    @app.put("/api/auth/{platform}")
+    def save_auth_state(platform: Literal["xiaohongshu", "douyin"], request: LoginStateRequest) -> dict[str, Any]:
+        path = XHS_COOKIE_PATH if platform == "xiaohongshu" else DOUYIN_COOKIE_PATH
+        cookies = [_validated_cookie(cookie) for cookie in request.cookies]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cookies, ensure_ascii=False, indent=2), encoding="utf-8")
+        return _login_state_summary(platform, path)
 
     @app.get("/api/reports")
     def list_reports() -> list[dict[str, Any]]:
@@ -340,3 +361,26 @@ def _now() -> str:
 
 def _mtime(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+
+
+def _validated_cookie(cookie: dict[str, Any]) -> dict[str, Any]:
+    name = str(cookie.get("name") or "").strip()
+    if not name or "value" not in cookie:
+        raise HTTPException(status_code=422, detail="each cookie requires name and value")
+    return {**cookie, "name": name, "value": str(cookie["value"])}
+
+
+def _login_state_summary(platform: str, path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {"platform": platform, "status": "auth_required", "cookie_count": 0, "updated_at": None}
+    try:
+        cookies = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"platform": platform, "status": "invalid", "cookie_count": 0, "updated_at": _mtime(path)}
+    count = len(cookies) if isinstance(cookies, list) else 0
+    return {
+        "platform": platform,
+        "status": "saved" if count else "auth_required",
+        "cookie_count": count,
+        "updated_at": _mtime(path),
+    }

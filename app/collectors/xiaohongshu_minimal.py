@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 DEFAULT_SEARCH_DIR = Path.home() / ".xiaohongshu-cli" / "search_results"
+DEFAULT_COOKIE_PATH = Path(".profiles") / "xiaohongshu" / "default.cookies.json"
 
 SORT_LABELS = {
     "general": "\u7efc\u5408",
@@ -89,6 +90,11 @@ async def collect_xiaohongshu(
         else:
             browser = await playwright.chromium.launch(**launch_options)
             context = await browser.new_context()
+            cookie_path = Path(os.getenv("XHS_COOKIE_PATH", str(DEFAULT_COOKIE_PATH)))
+            if cookie_path.is_file():
+                cookies = json.loads(cookie_path.read_text(encoding="utf-8"))
+                if isinstance(cookies, list) and cookies:
+                    await context.add_cookies(cookies)
 
         page = await context.new_page()
         try:

@@ -1,10 +1,11 @@
-import { FormEvent, useEffect, useState } from "react";
+﻿import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
 import { ErrorNotice } from "../components/ErrorNotice";
+import { StatusBadge } from "../components/StatusBadge";
 import type { MonitorJob } from "../types";
 
 const initialJob: MonitorJob = {
-  name: "Pet hotspot dry-run",
+  name: "宠物热点检查",
   enabled: true,
   platforms: ["douyin_hot_board"],
   keywords: ["pet"],
@@ -32,7 +33,7 @@ export function MonitorPage() {
       setSavedId(saved.job_id || "");
       setJobs(await api.listJobs());
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "Save failed");
+      setError(exc instanceof Error ? exc.message : "保存失败");
     } finally {
       setBusy(false);
     }
@@ -45,7 +46,7 @@ export function MonitorPage() {
     try {
       setResult(await api.runJob(savedId));
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "Run failed");
+      setError(exc instanceof Error ? exc.message : "运行失败");
     } finally {
       setBusy(false);
     }
@@ -57,7 +58,7 @@ export function MonitorPage() {
     try {
       setDigest(await api.digest());
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "Digest failed");
+      setError(exc instanceof Error ? exc.message : "摘要刷新失败");
     } finally {
       setBusy(false);
     }
@@ -68,50 +69,61 @@ export function MonitorPage() {
   }, []);
 
   return (
-    <section className="content-grid two-col">
-      <form className="panel" onSubmit={save}>
-        <label>任务名称<input value={job.name} onChange={(event) => setJob({ ...job, name: event.target.value })} /></label>
-        <label>平台<input value={job.platforms.join(",")} onChange={(event) => setJob({ ...job, platforms: split(event.target.value) })} /></label>
-        <label>关键词<input value={job.keywords.join(",")} onChange={(event) => setJob({ ...job, keywords: split(event.target.value) })} /></label>
-        <label>频率秒数<input type="number" min="60" value={job.interval_seconds} onChange={(event) => setJob({ ...job, interval_seconds: Number(event.target.value) })} /></label>
-        <label>热度阈值<input type="number" value={job.rule.min_heat_score || 0} onChange={(event) => setJob({ ...job, rule: { ...job.rule, min_heat_score: Number(event.target.value) } })} /></label>
-        <label>增长率阈值<input type="number" step="0.01" value={job.rule.min_growth_rate || 0} onChange={(event) => setJob({ ...job, rule: { ...job.rule, min_growth_rate: Number(event.target.value) } })} /></label>
-        <label>排名阈值<input type="number" min="1" value={job.rule.min_rank || 1} onChange={(event) => setJob({ ...job, rule: { ...job.rule, min_rank: Number(event.target.value) } })} /></label>
-        <label>互动量阈值<input type="number" min="0" value={job.rule.min_engagement || 0} onChange={(event) => setJob({ ...job, rule: { ...job.rule, min_engagement: Number(event.target.value) } })} /></label>
-        <label>Signals path<input value={job.signals_path || ""} onChange={(event) => setJob({ ...job, signals_path: event.target.value || undefined })} /></label>
-        <label className="switch">
+    <section className="monitor-layout">
+      <form className="studio-panel monitor-form" onSubmit={save}>
+        <div className="panel-intro compact">
+          <p className="section-kicker">配置</p>
+          <h2>本地信号检查</h2>
+        </div>
+        <div className="field-group">
+          <label>任务名<input value={job.name} onChange={(event) => setJob({ ...job, name: event.target.value })} /></label>
+          <label>间隔秒数<input type="number" min="60" value={job.interval_seconds} onChange={(event) => setJob({ ...job, interval_seconds: Number(event.target.value) })} /></label>
+        </div>
+        <div className="field-group">
+          <label>平台<input value={job.platforms.join(",")} onChange={(event) => setJob({ ...job, platforms: split(event.target.value) })} /></label>
+          <label>关键词<input value={job.keywords.join(",")} onChange={(event) => setJob({ ...job, keywords: split(event.target.value) })} /></label>
+        </div>
+        <div className="threshold-grid">
+          <label>热度<input type="number" value={job.rule.min_heat_score || 0} onChange={(event) => setJob({ ...job, rule: { ...job.rule, min_heat_score: Number(event.target.value) } })} /></label>
+          <label>增长<input type="number" step="0.01" value={job.rule.min_growth_rate || 0} onChange={(event) => setJob({ ...job, rule: { ...job.rule, min_growth_rate: Number(event.target.value) } })} /></label>
+          <label>排名<input type="number" min="1" value={job.rule.min_rank || 1} onChange={(event) => setJob({ ...job, rule: { ...job.rule, min_rank: Number(event.target.value) } })} /></label>
+          <label>互动<input type="number" min="0" value={job.rule.min_engagement || 0} onChange={(event) => setJob({ ...job, rule: { ...job.rule, min_engagement: Number(event.target.value) } })} /></label>
+        </div>
+        <label>信号路径<input value={job.signals_path || ""} onChange={(event) => setJob({ ...job, signals_path: event.target.value || undefined })} /></label>
+        <label className="toggle-line live-toggle">
           <input type="checkbox" checked={job.allow_live} onChange={(event) => setJob({ ...job, allow_live: event.target.checked })} />
-          允许 live 外部调用
+          <span>
+            允许联网
+            <small>{job.allow_live ? "可能访问外部服务" : "默认本地检查"}</small>
+          </span>
         </label>
-        <p className="hint">
-          {job.allow_live
-            ? "Live 已开启：后续接入真实配置时可能触发抖音、Webhook 或其他外部服务。"
-            : "Live 已关闭：手动运行使用本地 signals 文件；没有 signals 文件则执行空 dry-run。"}
-        </p>
-        <div className="actions">
-          <button className="primary" disabled={busy}>Save job</button>
-          <button type="button" disabled={busy || !savedId} onClick={() => void runOnce()}>Run once</button>
+        <div className="actions command-row">
+          <button className="primary" disabled={busy}>保存</button>
+          <button type="button" disabled={busy || !savedId} onClick={() => void runOnce()}>运行一次</button>
         </div>
       </form>
-      <section className="panel">
+
+      <section className="studio-panel monitor-results">
         <div className="panel-head">
-          <h2>Last run</h2>
-          <span className="env-pill">{savedId || "unsaved"}</span>
-        </div>
-        <div className="actions">
-          <button type="button" disabled={busy} onClick={() => void refreshDigest()}>Refresh digest</button>
+          <div>
+            <p className="section-kicker">最近</p>
+            <h2>{savedId || "未保存"}</h2>
+          </div>
+          <StatusBadge status={busy ? "running" : savedId ? "success" : "pending"} />
         </div>
         {error && <ErrorNotice message={error} />}
-        <pre className="json-preview">{JSON.stringify(result || { next_step: "Save a job, then run once." }, null, 2)}</pre>
+        <div className="actions"><button type="button" disabled={busy} onClick={() => void refreshDigest()}>刷新摘要</button></div>
+        <pre className="json-preview">{JSON.stringify(result || { next_step: "先保存，再运行一次。" }, null, 2)}</pre>
         {digest && <pre className="json-preview">{JSON.stringify(digest, null, 2)}</pre>}
-        <div className="asset-list">
+      </section>
+
+      <section className="studio-panel saved-jobs">
+        <div className="panel-head"><h2>已保存</h2><span className="env-pill">{jobs.length}</span></div>
+        <div className="report-list">
           {jobs.map((saved) => (
-            <button key={saved.job_id} className="report-row" onClick={() => setSavedId(saved.job_id || "")}>
-              <span>
-                <strong>{saved.name}</strong>
-                <small>{saved.platforms.join(", ")} · {saved.keywords.join(", ")}</small>
-              </span>
-              <span className="env-pill">{saved.allow_live ? "live" : "dry-run"}</span>
+            <button key={saved.job_id} className={savedId === saved.job_id ? "report-row active" : "report-row"} onClick={() => setSavedId(saved.job_id || "")}>
+              <span><strong>{saved.name}</strong><small>{saved.platforms.join(", ")} · {saved.keywords.join(", ")}</small></span>
+              <span className="env-pill">{saved.allow_live ? "联网" : "本地"}</span>
             </button>
           ))}
         </div>

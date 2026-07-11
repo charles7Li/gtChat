@@ -1,5 +1,6 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { api } from "../api";
+import { EmptyState } from "../components/EmptyState";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { FileDropzone } from "../components/FileDropzone";
 import { StatusBadge } from "../components/StatusBadge";
@@ -14,7 +15,7 @@ export function UploadPage({ onOpenReports }: { onOpenReports: () => void }) {
   async function upload(files: FileList) {
     const accepted = Array.from(files).filter(isAccepted);
     if (accepted.length !== files.length) {
-      setError("Unsupported file type. Accept video, image, CSV, or JSON.");
+      setError("文件类型暂不支持。");
     }
     if (!accepted.length) return;
     setBusy(true);
@@ -23,7 +24,7 @@ export function UploadPage({ onOpenReports }: { onOpenReports: () => void }) {
       const uploaded = await Promise.all(accepted.map((file) => api.upload(file)));
       setAssets((current) => [...uploaded, ...current]);
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "Upload failed");
+      setError(exc instanceof Error ? exc.message : "上传失败");
     } finally {
       setBusy(false);
     }
@@ -37,7 +38,7 @@ export function UploadPage({ onOpenReports }: { onOpenReports: () => void }) {
       if (asset.file_type === "video") setProcessResult(await api.analyzeVideo(asset.path));
       if (asset.file_type === "csv" || asset.file_type === "json") setProcessResult(await api.importFile(asset.path));
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "Process failed");
+      setError(exc instanceof Error ? exc.message : "处理失败");
     } finally {
       setBusy(false);
     }
@@ -46,42 +47,57 @@ export function UploadPage({ onOpenReports }: { onOpenReports: () => void }) {
   const briefPath = getOutputPath(processResult);
 
   return (
-    <section className="content-grid">
-      <div className="panel">
+    <section className="upload-layout">
+      <div className="intake-panel">
+        <div className="panel-intro">
+          <p className="section-kicker">导入</p>
+          <h2>添加素材</h2>
+        </div>
         <FileDropzone disabled={busy} onFiles={upload} />
         {error && <ErrorNotice message={error} />}
       </div>
-      <div className="panel">
+
+      <section className="studio-panel">
         <div className="panel-head">
-          <h2>Uploaded assets</h2>
-          <StatusBadge status={busy ? "running" : "success"} />
+          <div>
+            <p className="section-kicker">队列</p>
+            <h2>已上传</h2>
+          </div>
+          <StatusBadge status={busy ? "running" : assets.length ? "success" : "pending"} />
         </div>
         <div className="asset-list">
           {assets.map((asset) => (
-            <div className="row" key={asset.asset_id}>
+            <div className="asset-row" key={asset.asset_id}>
               <div>
                 <strong>{asset.filename}</strong>
                 <span>{asset.file_type} · {asset.path}</span>
               </div>
               <button disabled={busy || asset.file_type === "image" || asset.file_type === "other"} onClick={() => process(asset)}>
-                Process
+                处理
               </button>
             </div>
           ))}
-          {!assets.length && <p className="muted">上传素材后，视频可进入本地分析，CSV/JSON 可进入导入流程。</p>}
+          {!assets.length && <EmptyState title="暂无素材" action="拖入文件开始。" />}
         </div>
-        {processResult && (
+      </section>
+
+      <section className="studio-panel result-panel">
+        <div className="panel-head">
+          <div>
+            <p className="section-kicker">结果</p>
+            <h2>最新输出</h2>
+          </div>
+          <button type="button" onClick={onOpenReports}>报告</button>
+        </div>
+        {processResult ? (
           <>
-            {briefPath && (
-              <a href={`/api/files?path=${encodeURIComponent(briefPath)}`}>
-                Open video_analysis_brief.json
-              </a>
-            )}
+            {briefPath && <a className="artifact-link" href={`/api/files?path=${encodeURIComponent(briefPath)}`}>打开分析文件</a>}
             <pre className="json-preview">{JSON.stringify(processResult, null, 2)}</pre>
           </>
+        ) : (
+          <p className="muted">处理结果会显示在这里。</p>
         )}
-        <button onClick={onOpenReports}>Open reports</button>
-      </div>
+      </section>
     </section>
   );
 }

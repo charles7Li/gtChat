@@ -1,22 +1,17 @@
-import { useRef } from "react";
+import { DragEvent } from "react";
 
-export function FileDropzone({ disabled, onFiles }: { disabled?: boolean; onFiles: (files: FileList) => void }) {
-  const inputRef = useRef<HTMLInputElement>(null);
+export function FileDropzone({ disabled, onFiles }: { disabled: boolean; onFiles: (files: FileList) => void }) {
+  function drop(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    if (!disabled && event.dataTransfer.files.length) onFiles(event.dataTransfer.files);
+  }
+
   return (
-    <div
-      className={disabled ? "dropzone disabled" : "dropzone"}
-      onDragOver={(event) => event.preventDefault()}
-      onDrop={(event) => {
-        event.preventDefault();
-        if (!disabled && event.dataTransfer.files.length) onFiles(event.dataTransfer.files);
-      }}
-    >
-      <input ref={inputRef} type="file" multiple disabled={disabled} onChange={(event) => event.target.files && onFiles(event.target.files)} />
-      <strong>拖拽素材到这里</strong>
-      <span>支持 video、image、CSV、JSON。XLSX 等拿到真实样本后再补。</span>
-      <button type="button" disabled={disabled} onClick={() => inputRef.current?.click()}>
-        Select files
-      </button>
-    </div>
+    <label className={`dropzone${disabled ? " disabled" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={drop}>
+      <span className="logo-placeholder quiet" aria-hidden="true" />
+      <strong>拖入文件，或点击选择</strong>
+      <span>支持视频、图片、CSV 与 JSON；文件只在本地处理。</span>
+      <input type="file" multiple disabled={disabled} onChange={(event) => event.target.files && onFiles(event.target.files)} />
+    </label>
   );
 }

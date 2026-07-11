@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import { ErrorNotice } from "../components/ErrorNotice";
+import { EvidenceDrawer } from "../components/EvidenceDrawer";
 import { ReportPreview } from "../components/ReportPreview";
 import { StatusBadge } from "../components/StatusBadge";
 import type { ChatRun } from "../types";
@@ -18,9 +19,11 @@ export function ReportsPage() {
     setLoading(true);
     setError("");
     try {
-      setReports(await api.listReports());
+      const items = await api.listReports();
+      setReports(items);
+      if (!selected && items[0]) await preview(items[0].run_id);
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "Failed to load reports");
+      setError(exc instanceof Error ? exc.message : "报告加载失败");
     } finally {
       setLoading(false);
     }
@@ -29,10 +32,11 @@ export function ReportsPage() {
   async function preview(runId: string) {
     setError("");
     try {
-      setSelected(await api.getReport(runId));
+      const report = await api.getReport(runId);
+      setSelected(report);
       setArtifact(null);
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "Failed to load report");
+      setError(exc instanceof Error ? exc.message : "报告打开失败");
     }
   }
 
@@ -43,7 +47,7 @@ export function ReportsPage() {
     try {
       setArtifact(await api.getArtifact(selected.run_id, name));
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "Failed to load artifact");
+      setError(exc instanceof Error ? exc.message : "证据加载失败");
     }
   }
 
@@ -52,47 +56,50 @@ export function ReportsPage() {
   }, []);
 
   return (
-    <section className="content-grid two-col wide-left">
-      <div className="panel">
+    <section className="reports-layout">
+      <aside className="report-index">
         <div className="panel-head">
-          <h2>Reports</h2>
-          <button onClick={() => void load()} disabled={loading}>Refresh</button>
+          <div>
+            <p className="section-kicker">列表</p>
+            <h2>最近报告</h2>
+          </div>
+          <button type="button" onClick={() => void load()} disabled={loading}>刷新</button>
         </div>
         {error && <ErrorNotice message={error} onRetry={load} />}
-        {!loading && !reports.length && <EmptyState title="还没有报告" action="先在 Agent Chat 运行一次 workflow。" />}
+        {!loading && !reports.length && <EmptyState title="暂无报告" action="先运行一次简报。" />}
         <div className="report-list">
           {reports.map((report) => (
-            <button key={report.run_id} className="report-row" onClick={() => void preview(report.run_id)}>
+            <button key={report.run_id} className={selected?.run_id === report.run_id ? "report-row active" : "report-row"} onClick={() => void preview(report.run_id)}>
               <span>
                 <strong>{report.run_id}</strong>
-                <small>
-                  {report.route} · {new Date(report.created_at).toLocaleString()} · {report.warnings?.length || 0} warnings
-                </small>
+                <small>{report.route || "未知路径"}</small>
+                <small>{new Date(report.created_at).toLocaleString()} · {report.warnings?.length || 0} 条提醒</small>
               </span>
               <StatusBadge status={report.status} />
             </button>
           ))}
         </div>
-      </div>
-      <div className="panel">
-        <div className="panel-head">
-          <h2>Preview</h2>
-          {selected?.run_id && <a href={`/api/reports/${encodeURIComponent(selected.run_id)}/download`}>Download</a>}
+      </aside>
+
+      <section className="reader-pane">
+        <div className="reader-toolbar">
+          <div>
+            <p className="section-kicker">阅读</p>
+            <h2>{selected?.run_id || "选择一份报告"}</h2>
+          </div>
+          {selected?.run_id && <a className="button-link" href={`/api/reports/${encodeURIComponent(selected.run_id)}/download`}>下载 MD</a>}
         </div>
         <ReportPreview markdown={selected?.markdown || ""} />
-        {selected && (
-          <div className="debug-links">
-            <div className="actions">
-              <button onClick={() => void loadArtifact("trace")}>Trace</button>
-              <button onClick={() => void loadArtifact("manifest")}>Manifest</button>
-              <button onClick={() => void loadArtifact("evidence")}>Evidence</button>
-            </div>
-            <span>Trace: {selected.trace_path || "missing"}</span>
-            <span>Manifest: {selected.manifest_path || "missing"}</span>
-            {artifact && <pre className="json-preview">{artifactName}: {JSON.stringify(artifact, null, 2)}</pre>}
-          </div>
-        )}
-      </div>
+      </section>
+
+      <EvidenceDrawer
+        selectedName={artifactName}
+        artifact={artifact}
+        tracePath={selected?.trace_path}
+        manifestPath={selected?.manifest_path}
+        evidencePath={selected?.evidence_path}
+        onLoad={loadArtifact}
+      />
     </section>
   );
 }

@@ -188,3 +188,33 @@ def test_files_endpoint_reads_only_artifact_roots(monkeypatch, tmp_path):
     assert allowed.status_code == 200
     assert allowed.text == "{\"ok\": true}"
     assert blocked.status_code == 400
+
+
+def test_auth_state_can_be_saved_and_queried_without_returning_cookies(monkeypatch, tmp_path):
+    xhs_path = tmp_path / "xhs.cookies.json"
+    douyin_path = tmp_path / "douyin.cookies.json"
+    monkeypatch.setattr(web_api, "XHS_COOKIE_PATH", xhs_path)
+    monkeypatch.setattr(web_api, "DOUYIN_COOKIE_PATH", douyin_path)
+    client = TestClient(web_api.create_app())
+
+    initial = client.get("/api/auth/status").json()
+    assert initial["xiaohongshu"]["status"] == "auth_required"
+
+    response = client.put(
+        "/api/auth/xiaohongshu",
+        json={"cookies": [{"name": "web_session", "value": "secret", "domain": ".xiaohongshu.com", "path": "/"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "saved"
+    assert response.json()["cookie_count"] == 1
+    assert "secret" not in response.text
+    assert json.loads(xhs_path.read_text(encoding="utf-8"))[0]["value"] == "secret"
+
+
+def test_auth_state_rejects_invalid_platform_and_cookie(monkeypatch, tmp_path):
+    monkeypatch.setattr(web_api, "XHS_COOKIE_PATH", tmp_path / "xhs.cookies.json")
+    client = TestClient(web_api.create_app())
+
+    assert client.put("/api/auth/weibo", json={"cookies": [{"name": "a", "value": "b"}]}).status_code == 422
+    assert client.put("/api/auth/xiaohongshu", json={"cookies": [{"value": "missing-name"}]}).status_code == 422

@@ -1,5 +1,13 @@
-import type { RunStatus } from "../types";
+﻿import type { RunStatus } from "../types";
 
-export function StatusBadge({ status }: { status: RunStatus | string }) {
-  return <span className={`status status-${status}`}>{status}</span>;
+const labels: Record<RunStatus, string> = {
+  pending: "待处理",
+  running: "运行中",
+  success: "完成",
+  failed: "失败",
+  unknown: "未知",
+};
+
+export function StatusBadge({ status }: { status: RunStatus }) {
+  return <span className={`status status-${status}`}>{labels[status]}</span>;
 }

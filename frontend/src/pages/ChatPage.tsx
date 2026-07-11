@@ -1,28 +1,33 @@
-import { FormEvent, useState } from "react";
+﻿import { FormEvent, useState } from "react";
 import { api } from "../api";
+import { BriefBuilder } from "../components/BriefBuilder";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { RunTimeline } from "../components/RunTimeline";
 import { StatusBadge } from "../components/StatusBadge";
 import type { ChatRun, RunStatus } from "../types";
 
 export function ChatPage({ onOpenReports }: { onOpenReports: () => void }) {
-  const [query, setQuery] = useState("宠物用品趋势分析");
+  const [query, setQuery] = useState("帮我找出宠物内容里最值得跟进的角度，并整理成可执行的拍摄方案。");
   const [taskType, setTaskType] = useState("趋势分析");
+  const [outputTarget, setOutputTarget] = useState("策略报告");
+  const [sourceContext, setSourceContext] = useState("本地结果");
   const [allowLive, setAllowLive] = useState(false);
   const [status, setStatus] = useState<RunStatus>("pending");
   const [run, setRun] = useState<ChatRun | null>(null);
   const [error, setError] = useState("");
 
+  const composedBrief = `任务：${taskType}。输出：${outputTarget}。来源：${sourceContext}。简报：${query}`;
+
   async function runWorkflow() {
     setStatus("running");
     setError("");
     try {
-      const result = await api.runChat(`${taskType}: ${query}`, allowLive);
+      const result = await api.runChat(composedBrief, allowLive);
       setRun(result);
       setStatus("success");
     } catch (exc) {
       setStatus("failed");
-      setError(exc instanceof Error ? exc.message : "Run failed");
+      setError(exc instanceof Error ? exc.message : "运行失败");
     }
   }
 
@@ -39,50 +44,66 @@ export function ChatPage({ onOpenReports }: { onOpenReports: () => void }) {
   }
 
   return (
-    <section className="content-grid two-col">
-      <form className="panel" onSubmit={submit}>
-        <label>
-          任务类型
-          <select value={taskType} onChange={(event) => setTaskType(event.target.value)}>
-            <option>趋势分析</option>
-            <option>仿拍方案</option>
-            <option>参考视频拆解</option>
-            <option>热点分析</option>
-          </select>
-        </label>
-        <label>
+    <section className="chat-layout">
+      <form className="brief-panel" onSubmit={submit}>
+        <div className="panel-intro">
+          <p className="section-kicker">简报</p>
+          <h2>把想法整理成一次任务</h2>
+        </div>
+        <BriefBuilder
+          taskType={taskType}
+          outputTarget={outputTarget}
+          sourceContext={sourceContext}
+          allowLive={allowLive}
+          onTaskTypeChange={setTaskType}
+          onOutputTargetChange={setOutputTarget}
+          onSourceContextChange={setSourceContext}
+          onAllowLiveChange={setAllowLive}
+        />
+        <label className="brief-input">
           需求
-          <textarea value={query} onChange={(event) => setQuery(event.target.value)} rows={8} />
+          <textarea value={query} onChange={(event) => setQuery(event.target.value)} rows={7} placeholder="写下目标人群、平台、素材和你想判断的问题。" />
         </label>
-        <label className="switch">
-          <input type="checkbox" checked={allowLive} onChange={(event) => setAllowLive(event.target.checked)} />
-          允许 live 外部调用
-        </label>
-        <p className="hint">默认走本地/offline 能力。完整采集流程需要显式打开 live。</p>
-        <div className="actions">
+        <div className="actions command-row">
           <button className="primary" disabled={status === "running" || !query.trim()}>
-            {status === "running" ? "Running..." : "Run workflow"}
+            {status === "running" ? "运行中" : "开始分析"}
           </button>
-          <button type="button" onClick={startNew}>New</button>
+          <button type="button" onClick={startNew}>清空</button>
         </div>
       </form>
 
-      <section className="panel">
-        <div className="panel-head">
-          <h2>Run status</h2>
-          <StatusBadge status={status} />
-        </div>
-        <RunTimeline status={status} />
-        {error && <ErrorNotice message={error} onRetry={() => void runWorkflow()} />}
-        {run && (
-          <div className="result-list">
-            <div><span>Route</span><strong>{run.route}</strong></div>
-            <div><span>Report</span><strong>{run.report_path || "pending"}</strong></div>
-            <div><span>Trace</span><strong>{run.trace_path || "pending"}</strong></div>
-            <button onClick={onOpenReports}>Open reports</button>
+      <aside className="context-rail">
+        <section className="studio-panel status-panel">
+          <div className="panel-head">
+            <div>
+              <p className="section-kicker">状态</p>
+              <h2>任务进度</h2>
+            </div>
+            <StatusBadge status={status} />
           </div>
-        )}
-      </section>
+          <RunTimeline status={status} />
+          {error && <ErrorNotice message={error} onRetry={() => void runWorkflow()} />}
+          {run ? (
+            <div className="result-list">
+              <div><span>路径</span><strong>{run.route || "等待中"}</strong></div>
+              <div><span>报告</span><strong>{run.report_path || "等待中"}</strong></div>
+              <div><span>记录</span><strong>{run.trace_path || "等待中"}</strong></div>
+              <button type="button" onClick={onOpenReports}>查看报告</button>
+            </div>
+          ) : (
+            <p className="muted">尚未运行。默认只走本地。</p>
+          )}
+        </section>
+
+        <section className="studio-panel mini-context">
+          <p className="section-kicker">当前</p>
+          <dl>
+            <div><dt>任务</dt><dd>{taskType}</dd></div>
+            <div><dt>输出</dt><dd>{outputTarget}</dd></div>
+            <div><dt>来源</dt><dd>{sourceContext}</dd></div>
+          </dl>
+        </section>
+      </aside>
     </section>
   );
 }

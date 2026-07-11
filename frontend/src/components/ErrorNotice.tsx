@@ -1,8 +1,11 @@
-export function ErrorNotice({ message, onRetry }: { message: string; onRetry?: () => void }) {
+﻿export function ErrorNotice({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
     <div className="notice error" role="alert">
-      <span>{message}</span>
-      {onRetry && <button onClick={onRetry}>Retry</button>}
+      <div>
+        <strong>需要处理</strong>
+        <p>{message}</p>
+      </div>
+      {onRetry && <button type="button" onClick={onRetry}>重试</button>}
     </div>
   );
 }
