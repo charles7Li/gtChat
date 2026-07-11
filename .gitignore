@@ -28,6 +28,7 @@ env/
 node_modules/
 dist/
 *.tsbuildinfo
+frontend/.vite-dev.*.log
 
 # Local environment and editor files
 .env
@@ -72,7 +73,9 @@ docs/upgrade/23-skill-registry.md
 docs/upgrade/24-douyin-login-upgrade.md
 docs/upgrade/25-user-web-frontend.md
 docs/upgrade/26-user-web-frontend.md
-docs/gtchat-v3-codex-implementation-plan.md
+docs/mochi-scout-v3-codex-implementation-plan.md
 docs/project-status.md
 local_run_commands.md
 resource/社交网络.mp4
+docs/upgrade/27-studio-minimal-ui-upgrade.md
+PRODUCT.md
