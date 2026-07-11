@@ -1,1 +1,1 @@
-"""Local eval helpers for gtChat."""
+"""Local eval helpers for Mochi Scout."""
