@@ -1,5 +1,7 @@
 export type RunStatus = "pending" | "running" | "success" | "failed" | "unknown";
 
+export type ThemeId = "ragdoll" | "siamese" | "calico" | "tabby";
+
 export type ChatRun = {
   run_id: string;
   query?: string;

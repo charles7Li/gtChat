@@ -1,7 +1,7 @@
 ﻿import type { Page } from "../App";
 
 const items: Array<{ id: Page; label: string; detail: string; icon: string }> = [
-  { id: "chat", label: "简报", detail: "生成任务", icon: "简" },
+  { id: "chat", label: "首页", detail: "监控 / 对话", icon: "首" },
   { id: "uploads", label: "素材", detail: "视频与数据", icon: "素" },
   { id: "reports", label: "报告", detail: "阅读器", icon: "报" },
   { id: "monitor", label: "信号", detail: "本地检查", icon: "信" },
@@ -11,7 +11,7 @@ const items: Array<{ id: Page; label: string; detail: string; icon: string }> = 
 export function Sidebar({ page, onChange }: { page: Page; onChange: (page: Page) => void }) {
   return (
     <nav className="sidebar" aria-label="主导航">
-      <button className="brand-lockup" type="button" onClick={() => onChange("chat")} aria-label="打开简报">
+      <button className="brand-lockup" type="button" onClick={() => onChange("chat")} aria-label="打开首页">
         <span className="logo-placeholder" aria-hidden="true" />
         <span>
           <strong>Mochi Scout</strong>

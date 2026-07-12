@@ -43,39 +43,10 @@ Thumbs.db
 
 # Local transfer/export bundles
 /docs.zip
-docs/local_environment.md
-docs/xiaohongshu-search-filter.md
-docs/upgrade/00-master-plan.md
-docs/upgrade/01-data-pipeline.md
-docs/upgrade/02-llm-and-evidence.md
-docs/upgrade/03-node-runner-hooks.md
-docs/upgrade/04-reporting-memory-trace.md
-docs/upgrade/05-testing.md
-docs/upgrade/06-langchain-langgraph-langsmith.md
-docs/upgrade/07-artifact-contracts.md
-docs/upgrade/08-route-manifests.md
-docs/upgrade/09-checkpoints-decision-log.md
-docs/upgrade/10-stage-review-gates.md
-docs/upgrade/11-local-reference-video-analysis.md
-docs/upgrade/12-douyin-collection-upgrade.md
-docs/upgrade/13-xiaohongshu-collector-login-upgrade.md
-docs/upgrade/14-application-modes-and-subagents.md
-docs/upgrade/15-sqlite-event-queue.md
-docs/upgrade/99-windows-exe-packaging.md
-docs/upgrade/16-douyin-data-source-upgrade.md
-docs/upgrade/17-dual-entry-application-design.md
-docs/upgrade/18-scheduled-hotspot-monitor.md
-docs/upgrade/19-chanmama-folder-auto-import.md
-docs/upgrade/20-evaluation-system.md
-docs/upgrade/21-performance-eval.md
-docs/upgrade/22-memory-2.md
-docs/upgrade/23-skill-registry.md
-docs/upgrade/24-douyin-login-upgrade.md
-docs/upgrade/25-user-web-frontend.md
-docs/upgrade/26-user-web-frontend.md
-docs/mochi-scout-v3-codex-implementation-plan.md
-docs/project-status.md
+docs/
 local_run_commands.md
-resource/社交网络.mp4
-docs/upgrade/27-studio-minimal-ui-upgrade.md
+resource/
 PRODUCT.md
+
+# Claude Code
+.claude/
