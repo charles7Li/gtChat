@@ -1,0 +1,41 @@
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/mobile/Dockerfile
+    env_file: ${MOBILE_ENV_FILE:-mobile.env.example}
+    environment:
+      MOBILE_DB_PATH: /data/mobile.db
+      MOBILE_OBJECT_ROOT: /data/objects
+      MOBILE_WORKFLOW_ROOT: /data/outputs
+    command: ["uvicorn", "app.web_api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - mobile-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/mobile/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: deploy/mobile/Dockerfile
+    env_file: ${MOBILE_ENV_FILE:-mobile.env.example}
+    environment:
+      MOBILE_DB_PATH: /data/mobile.db
+      MOBILE_OBJECT_ROOT: /data/objects
+      MOBILE_WORKFLOW_ROOT: /data/outputs
+    command: ["python", "-m", "app.mobile_api.worker", "--interval", "2"]
+    volumes:
+      - mobile-data:/data
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  mobile-data:

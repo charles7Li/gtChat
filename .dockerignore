@@ -1,0 +1,16 @@
+.git
+.claude
+.tmp
+.pytest*
+__pycache__
+*.pyc
+frontend/node_modules
+frontend/dist
+miniprogram/node_modules
+miniprogram/dist
+outputs
+uploads
+monitor_state
+.profiles
+.env
+

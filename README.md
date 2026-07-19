@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/python-3.11+-blue" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/python-3.13-blue" alt="Python 3.13">
   <img src="https://img.shields.io/badge/framework-LangGraph-green" alt="LangGraph">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="License">
 </p>
@@ -28,14 +28,13 @@ Mochi Scout is a LangGraph-based agent pipeline that automates content strategy 
 git clone https://github.com/your-org/mochi-scout.git
 cd mochi-scout
 
-pip install -e .
-pip install langgraph pydantic
+pip install -e ".[dev]"
 
 # Optional: LLM support
-pip install langchain langchain-openai
+pip install -e ".[llm]"
 
 # Optional: Playwright for XHS collection
-pip install playwright
+pip install -e ".[collectors]"
 playwright install chromium
 ```
 
@@ -62,6 +61,43 @@ Output lands in `outputs/<run_id>/`:
 - `trend_report.md` — full analysis report
 - `manifest.json` — run metadata and source provenance
 - `agent_trace.json` — per-node timing, LLM events, performance summary
+
+## WeChat Mini Program (development)
+
+The repository now includes a Taro/React mini program under `miniprogram/` and a tenant-isolated Mobile API under `app/mobile_api/`.
+
+```bash
+# Backend: local mock WeChat login, never calls WeChat
+set WECHAT_AUTH_MODE=mock
+uvicorn app.web_api:app --host 127.0.0.1 --port 8000
+
+# Separate terminal: process one queued mobile job
+python -m app.mobile_api.worker --once
+
+# Mini program
+cd miniprogram
+npm install
+npm run typecheck
+npm run build:weapp
+```
+
+Import `miniprogram/dist` in WeChat DevTools. The production release still requires a real AppID, a filed HTTPS domain, WeChat privacy/review configuration, cloud storage/database/queue adapters, and completion of the release gates in `docs/upgrade/29-wechat-miniprogram-release-plan.md`.
+
+### Web API security
+
+The desktop Web API only accepts file paths inside managed upload, report, and monitor directories. Keep arbitrary local paths disabled outside isolated development environments.
+
+```bash
+# Required when MOCHI_ENV=production
+export MOCHI_ENV=production
+export MOCHI_WEB_ADMIN_TOKEN=replace-with-a-long-random-secret
+
+# Optional limits
+export MOCHI_WEB_MAX_UPLOAD_BYTES=52428800
+export MOBILE_WORKER_LEASE_SECONDS=300
+```
+
+The private admin frontend can pass the shared token through `VITE_MOCHI_ADMIN_TOKEN`. For an internet-facing deployment, put the admin UI behind a proper identity-aware reverse proxy instead of distributing this token to untrusted clients. `MOCHI_WEB_ALLOW_ARBITRARY_LOCAL_PATHS=true` is a local-development escape hatch and must not be enabled in production.
 
 ## Routes
 
