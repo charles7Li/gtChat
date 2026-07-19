@@ -356,22 +356,6 @@ class MobileStore:
                 sql,
                 params,
             ).rowcount
-            if updated == 1 and self.notifications_enabled:
-                notification_id = f"ntf_{uuid4().hex}"
-                now = _now()
-                conn.execute(
-                    """
-                    insert into notification_outbox
-                      (id, user_id, job_id, notification_type, consent_id, status, attempts,
-                       available_at, worker_id, locked_until, sent_at, last_error, created_at)
-                    select ?, user_id, id, 'task_completed', null, 'pending', 0,
-                           ?, null, null, null, null, ? from jobs
-                    where id = ? and not exists (
-                      select 1 from notification_outbox where job_id = ? and notification_type = 'task_completed'
-                    )
-                    """,
-                    (notification_id, now, now, job_id, job_id),
-                )
             return updated == 1
 
     def is_cancel_requested(self, job_id: str) -> bool:
@@ -409,6 +393,22 @@ class MobileStore:
                 sql,
                 params,
             ).rowcount
+            if updated == 1 and self.notifications_enabled:
+                notification_id = f"ntf_{uuid4().hex}"
+                now = _now()
+                conn.execute(
+                    """
+                    insert into notification_outbox
+                      (id, user_id, job_id, notification_type, consent_id, status, attempts,
+                       available_at, worker_id, locked_until, sent_at, last_error, created_at)
+                    select ?, user_id, id, 'task_completed', null, 'pending', 0,
+                           ?, null, null, null, null, ? from jobs
+                    where id = ? and not exists (
+                      select 1 from notification_outbox where job_id = ? and notification_type = 'task_completed'
+                    )
+                    """,
+                    (notification_id, now, now, job_id, job_id),
+                )
             return updated == 1
 
     def fail_job(self, job_id: str, code: str, message: str, worker_id: str | None = None) -> None:
