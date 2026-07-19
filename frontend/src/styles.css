@@ -380,6 +380,15 @@ textarea { resize: vertical; line-height: 1.5; }
   background: var(--danger);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 15%, transparent);
 }
+.login-light.needs-auth {
+  background: var(--danger);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 15%, transparent);
+}
+.compact-auth {
+  min-width: 112px;
+  border-color: var(--line);
+  background: var(--paper);
+}
 .login-editor {
   position: absolute;
   z-index: 10;

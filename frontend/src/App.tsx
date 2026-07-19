@@ -1,19 +1,17 @@
 ﻿import { useEffect, useMemo, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { HomePage } from "./pages/HomePage";
-import { MonitorPage } from "./pages/MonitorPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { UploadPage } from "./pages/UploadPage";
 import type { ThemeId } from "./types";
 
-export type Page = "chat" | "monitor" | "uploads" | "reports" | "settings";
+export type Page = "chat" | "uploads" | "reports" | "settings";
 
 const pageMeta: Record<Page, { title: string; eyebrow: string; action: string }> = {
   chat: { title: "工作台", eyebrow: "首页", action: "双模式" },
   uploads: { title: "素材", eyebrow: "素材库", action: "本地导入" },
   reports: { title: "报告", eyebrow: "阅读器", action: "查看证据" },
-  monitor: { title: "信号", eyebrow: "监控", action: "手动检查" },
   settings: { title: "设置", eyebrow: "运行", action: "本地优先" },
 };
 
@@ -55,8 +53,7 @@ export default function App() {
           </div>
         </header>
         <div className="page-surface" key={page}>
-          {page === "chat" && <HomePage onOpenReports={() => setPage("reports")} />}
-          {page === "monitor" && <MonitorPage />}
+          {page === "chat" && <HomePage onOpenReports={() => setPage("reports")} onOpenSettings={() => setPage("settings")} />}
           {page === "uploads" && <UploadPage onOpenReports={() => setPage("reports")} />}
           {page === "reports" && <ReportsPage />}
           {page === "settings" && (

@@ -9,7 +9,10 @@ export type LoginState = {
 };
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const headers = new Headers(init?.headers);
+  const adminToken = import.meta.env.VITE_MOCHI_ADMIN_TOKEN;
+  if (adminToken) headers.set("x-mochi-admin-token", adminToken);
+  const response = await fetch(url, { ...init, headers });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     throw new Error(payload.detail || `${response.status} ${response.statusText}`);
