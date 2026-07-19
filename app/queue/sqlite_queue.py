@@ -31,13 +31,22 @@ class SQLiteQueue:
             self._add_event(conn, job_id, "enqueued", "")
         return job_id
 
-    def claim_next(self, job_types: list[str]) -> dict | None:
+    def claim_next(self, job_types: list[str], lease_seconds: int = 3600) -> dict | None:
         if not job_types:
             return None
-        now = _now()
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_until = (now_dt + timedelta(seconds=max(lease_seconds, 30))).isoformat()
         placeholders = ",".join("?" for _ in job_types)
         with self._connect() as conn:
             conn.execute("begin immediate")
+            conn.execute(
+                """
+                update jobs set status = 'pending', lease_until = null, updated_at = ?
+                where status = 'running' and lease_until is not null and lease_until <= ?
+                """,
+                (now, now),
+            )
             row = conn.execute(
                 f"""
                 select * from jobs
@@ -51,14 +60,20 @@ class SQLiteQueue:
             ).fetchone()
             if row is None:
                 return None
-            conn.execute("update jobs set status = 'running', updated_at = ? where id = ?", (now, row["id"]))
+            conn.execute(
+                "update jobs set status = 'running', lease_until = ?, updated_at = ? where id = ?",
+                (lease_until, now, row["id"]),
+            )
             self._add_event(conn, row["id"], "claimed", "")
             return self._row_to_job(row, status="running")
 
     def mark_done(self, job_id: str) -> None:
         now = _now()
         with self._connect() as conn:
-            conn.execute("update jobs set status = 'done', error = null, updated_at = ? where id = ?", (now, job_id))
+            conn.execute(
+                "update jobs set status = 'done', lease_until = null, error = null, updated_at = ? where id = ?",
+                (now, job_id),
+            )
             self._add_event(conn, job_id, "done", "")
 
     def mark_failed(self, job_id: str, error: str) -> None:
@@ -74,7 +89,7 @@ class SQLiteQueue:
             conn.execute(
                 """
                 update jobs
-                set status = ?, retry_count = ?, run_after = ?, error = ?, updated_at = ?
+                set status = ?, retry_count = ?, run_after = ?, lease_until = null, error = ?, updated_at = ?
                 where id = ?
                 """,
                 (status, retry_count, run_after, error[:1000], now, job_id),
@@ -100,6 +115,7 @@ class SQLiteQueue:
                   retry_count integer not null default 0,
                   max_retries integer not null default 3,
                   error text,
+                  lease_until text,
                   created_at text not null,
                   updated_at text not null
                 );
@@ -113,10 +129,15 @@ class SQLiteQueue:
                 );
                 """
             )
+            columns = {str(row["name"]) for row in conn.execute("pragma table_info(jobs)")}
+            if "lease_until" not in columns:
+                conn.execute("alter table jobs add column lease_until text")
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
+        conn.execute("pragma journal_mode = wal")
+        conn.execute("pragma busy_timeout = 10000")
         return conn
 
     def _add_event(self, conn: sqlite3.Connection, job_id: str, event_type: str, message: str) -> None:

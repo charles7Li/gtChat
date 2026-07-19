@@ -1,3 +1,40 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mochi-scout"
+version = "0.2.0"
+description = "Planner-driven multi-agent workflow for content commerce analysis"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "langgraph>=1.1.4,<2",
+    "pydantic>=2.12,<3",
+    "PyYAML>=6,<7",
+    "uvicorn>=0.34,<1",
+]
+
+[project.optional-dependencies]
+llm = ["langchain>=1,<2", "langchain-openai>=1,<2", "langsmith>=0.4,<1"]
+collectors = ["playwright>=1.60,<2"]
+mobile-prod = ["boto3>=1.35,<2", "confluent-kafka>=2.12,<3", "cryptography>=46,<47", "psycopg[binary,pool]>=3.2,<4"]
+dev = ["httpx>=0.28,<1", "pytest>=8.4,<9"]
+
+[project.scripts]
+mochi-scout = "app.cli:main"
+mochi-mobile-worker = "app.mobile_api.worker:main"
+mochi-mobile-kafka = "app.mobile_api.kafka_worker:main"
+mochi-mobile-notify = "app.mobile_api.notification_worker:main"
+
+[tool.setuptools.packages.find]
+include = ["app*", "evals*", "pipeline_defs*"]
+
+[tool.setuptools.package-data]
+app = ["prompts/*.md", "skills/*.md"]
+pipeline_defs = ["*.yaml"]
+
 [tool.pytest.ini_options]
 addopts = "-p no:cacheprovider"
 pythonpath = ["."]

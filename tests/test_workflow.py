@@ -17,7 +17,7 @@ from app.memory import SimpleMemory
 from app.schemas.analysis import PatternExtractionResult, ReviewResult
 from app.workflow.evidence import build_evidence_pack
 from app.workflow.graph import clean_items, run_workflow, trace_writer_node
-from app.workflow.graph import commercial_data_import_node
+from app.workflow.graph import commercial_data_import_node, commercial_report_node
 from app.workflow.langgraph_runner import (
     build_langgraph_workflow,
     langgraph_available,
@@ -440,6 +440,7 @@ def test_route_manifests_match_current_langgraph_paths():
         "route",
         "memory_load",
         "commercial_data_import",
+        "commercial_report",
         "trace",
     ]
     assert manifests["hotspot_auto_analysis_path"].stage_names == [
@@ -462,6 +463,15 @@ def test_route_manifests_match_current_langgraph_paths():
             assert "collect" not in manifest.stage_names
 
 
+def test_route_manifests_load_from_packaged_resources_outside_repo(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
+    manifests = load_route_manifests()
+
+    assert "trend_report_path" in manifests
+    assert "commercial_data_analysis_path" in manifests
+
+
 def test_commercial_data_import_node_dry_run(tmp_path):
     root = tmp_path / "chanmama"
     pending = root / "pending"
@@ -473,6 +483,23 @@ def test_commercial_data_import_node_dry_run(tmp_path):
     assert state["commercial_import_summary"]["source"] == "chanmama"
     assert state["commercial_import_summary"]["record_count"] == 1
     assert (root / "processed" / "creators.csv").exists()
+
+
+def test_commercial_file_import_writes_non_empty_report(tmp_path):
+    export = tmp_path / "commercial.json"
+    export.write_text(json.dumps({"items": [{"video_id": "v1", "title": "demo"}]}), encoding="utf-8")
+    state = {
+        "run_id": "commercial-1",
+        "route": "commercial_data_analysis_path",
+        "commercial_data_path": str(export),
+    }
+
+    commercial_data_import_node(state)
+    commercial_report_node(state, tmp_path / "out")
+
+    report = tmp_path / "out" / "trend_report.md"
+    assert report.is_file()
+    assert "1 records" in report.read_text(encoding="utf-8")
 
 
 def test_hotspot_rule_builds_auto_analysis_payload():

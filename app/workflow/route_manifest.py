@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
+from typing import Any
 
 
 DEFAULT_MANIFEST_DIR = Path("pipeline_defs")
@@ -29,8 +31,9 @@ class RouteManifest:
         return [stage.name for stage in self.stages]
 
 
-def load_route_manifest(path: str | Path) -> RouteManifest:
-    data = _parse_manifest(Path(path))
+def load_route_manifest(path: str | Path | Any) -> RouteManifest:
+    resource = Path(path) if isinstance(path, (str, Path)) else path
+    data = _parse_manifest(resource)
     return RouteManifest(
         name=str(data["name"]),
         description=str(data.get("description", "")),
@@ -50,11 +53,21 @@ def load_route_manifest(path: str | Path) -> RouteManifest:
 
 
 def load_route_manifests(directory: str | Path = DEFAULT_MANIFEST_DIR) -> dict[str, RouteManifest]:
-    manifests = [load_route_manifest(path) for path in sorted(Path(directory).glob("*.yaml"))]
+    base = Path(directory)
+    if base.exists():
+        paths = sorted(base.glob("*.yaml"))
+    elif base == DEFAULT_MANIFEST_DIR:
+        paths = sorted(
+            (entry for entry in files("pipeline_defs").iterdir() if entry.name.endswith(".yaml")),
+            key=lambda entry: entry.name,
+        )
+    else:
+        paths = []
+    manifests = [load_route_manifest(path) for path in paths]
     return {manifest.name: manifest for manifest in manifests}
 
 
-def _parse_manifest(path: Path) -> dict:
+def _parse_manifest(path: Any) -> dict:
     data: dict = {}
     stages: list[dict] = []
     current_stage: dict | None = None

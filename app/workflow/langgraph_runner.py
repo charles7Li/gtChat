@@ -7,6 +7,7 @@ from typing import Callable
 from app.workflow.graph import (
     cleaner_node,
     commercial_data_import_node,
+    commercial_report_node,
     collector_node,
     evidence_pack_node,
     imitation_plan_node,
@@ -51,7 +52,10 @@ def build_langgraph_workflow(
     graph.add_node("commercial_data_import", _traced("commercial_data_import", commercial_data_import_node, progress_callback=progress_callback))
     graph.add_node("load_latest_search_results", _traced("load_latest_search_results", load_latest_search_results_node, progress_callback=progress_callback))
     graph.add_node("clean", _traced("clean", cleaner_node, progress_callback=progress_callback))
-    graph.add_node("store", _traced("store", storage_node, progress_callback=progress_callback))
+    graph.add_node(
+        "store",
+        _traced("store", lambda state: _store_for_run(state, output_dir), progress_callback=progress_callback),
+    )
     graph.add_node("trend_analyze", _traced("trend_analyze", trend_analyze_node, progress_callback=progress_callback))
     graph.add_node("pattern_extract", _traced("pattern_extract", pattern_extract_node, progress_callback=progress_callback))
     graph.add_node("video_pattern_extract", _traced("video_pattern_extract", video_pattern_extract_node, progress_callback=progress_callback))
@@ -59,6 +63,7 @@ def build_langgraph_workflow(
     graph.add_node("imitation_plan", _traced("imitation_plan", imitation_plan_node, progress_callback=progress_callback))
     graph.add_node("review", _traced("review", review_node, progress_callback=progress_callback))
     graph.add_node("report", _traced("report", report_node, output_dir, progress_callback=progress_callback))
+    graph.add_node("commercial_report", _traced("commercial_report", commercial_report_node, output_dir, progress_callback=progress_callback))
     graph.add_node("memory_write", _traced("memory_write", memory_write_node, progress_callback=progress_callback))
     graph.add_node("trace", lambda state: trace_writer_node(state, output_dir))
 
@@ -87,7 +92,8 @@ def build_langgraph_workflow(
         },
     )
 
-    graph.add_edge("commercial_data_import", "trace")
+    graph.add_edge("commercial_data_import", "commercial_report")
+    graph.add_edge("commercial_report", "trace")
     graph.add_edge("collect", "clean")
     graph.add_edge("load_latest_search_results", "clean")
     graph.add_conditional_edges(
@@ -132,13 +138,16 @@ def run_workflow_langgraph(
     user_query: str,
     output_dir: str | Path = "outputs/final_package",
     progress_callback: ProgressCallback | None = None,
+    *,
+    route_override: str | None = None,
+    input_overrides: dict | None = None,
 ) -> WorkflowState:
     app = build_langgraph_workflow(output_dir, progress_callback=progress_callback)
     config = _langsmith_run_config(user_query)
     if config:
-        result = app.invoke(create_initial_state(user_query), config=config)
+        result = app.invoke(create_initial_state(user_query, route_override=route_override, input_overrides=input_overrides), config=config)
     else:
-        result = app.invoke(create_initial_state(user_query))
+        result = app.invoke(create_initial_state(user_query, route_override=route_override, input_overrides=input_overrides))
     return result
 
 
@@ -188,6 +197,11 @@ def _traced(
 def _route_node(state: WorkflowState) -> WorkflowState:
     state["route"] = route_from_state(state)
     return state
+
+
+def _store_for_run(state: WorkflowState, output_dir: str | Path) -> WorkflowState:
+    state["artifact_output_dir"] = str(output_dir)
+    return storage_node(state)
 
 
 def _route_selector(state: WorkflowState) -> str:

@@ -57,6 +57,7 @@ def test_upload_asset_writes_file(monkeypatch, tmp_path):
 
 
 def test_video_analyze_calls_local_analyzer(monkeypatch, tmp_path):
+    monkeypatch.setattr(web_api, "UPLOADS_DIR", tmp_path)
     video = tmp_path / "video.mp4"
     video.write_bytes(b"fake")
     calls = {}
@@ -74,7 +75,8 @@ def test_video_analyze_calls_local_analyzer(monkeypatch, tmp_path):
     assert calls["max_keyframes"] == 2
 
 
-def test_imports_accept_uploaded_chanmama_file(tmp_path):
+def test_imports_accept_uploaded_chanmama_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(web_api, "UPLOADS_DIR", tmp_path)
     export = tmp_path / "items.json"
     export.write_text(json.dumps({"items": [{"video_id": "v1", "视频标题": "title"}]}), encoding="utf-8")
 
@@ -86,7 +88,9 @@ def test_imports_accept_uploaded_chanmama_file(tmp_path):
     assert payload["records"][0]["detected_entity_type"] == "video"
 
 
-def test_monitor_tick_uses_offline_snapshot(tmp_path):
+def test_monitor_tick_uses_offline_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setattr(web_api, "UPLOADS_DIR", tmp_path)
+    monkeypatch.setattr(web_api, "MONITOR_DIR", tmp_path)
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text(json.dumps([{"id": "1", "liked_count": 10}]), encoding="utf-8")
     response = TestClient(web_api.create_app()).post(
@@ -157,7 +161,8 @@ def test_monitor_job_run_once_uses_empty_signals(monkeypatch, tmp_path):
     assert calls["signals_path"].endswith("job-1.signals.json")
 
 
-def test_monitor_digest_summarizes_events(tmp_path):
+def test_monitor_digest_summarizes_events(monkeypatch, tmp_path):
+    monkeypatch.setattr(web_api, "MONITOR_DIR", tmp_path)
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     (state_dir / "events.jsonl").write_text(
@@ -218,3 +223,33 @@ def test_auth_state_rejects_invalid_platform_and_cookie(monkeypatch, tmp_path):
 
     assert client.put("/api/auth/weibo", json={"cookies": [{"name": "a", "value": "b"}]}).status_code == 422
     assert client.put("/api/auth/xiaohongshu", json={"cookies": [{"value": "missing-name"}]}).status_code == 422
+
+
+def test_web_api_rejects_unmanaged_local_paths(monkeypatch, tmp_path):
+    monkeypatch.setattr(web_api, "UPLOADS_DIR", tmp_path / "uploads")
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+
+    response = TestClient(web_api.create_app()).post(
+        "/api/imports", json={"source": "chanmama", "path": str(outside)}
+    )
+
+    assert response.status_code == 400
+    assert "managed storage" in response.json()["detail"]
+
+
+def test_web_api_rejects_monitor_job_path_traversal():
+    response = TestClient(web_api.create_app()).post(
+        "/api/monitor/jobs", json={"job_id": "../escape", "name": "bad"}
+    )
+
+    assert response.status_code == 422
+
+
+def test_web_admin_token_protects_non_mobile_routes(monkeypatch):
+    monkeypatch.setenv("MOCHI_WEB_ADMIN_TOKEN", "secret-token")
+    client = TestClient(web_api.create_app())
+
+    assert client.get("/api/reports").status_code == 401
+    assert client.get("/api/reports", headers={"x-mochi-admin-token": "secret-token"}).status_code == 200
+    assert client.get("/api/v1/mobile/health").status_code == 200

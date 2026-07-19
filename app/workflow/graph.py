@@ -17,13 +17,13 @@ from app.agents import (
 from app.cleaner import clean_items as clean_notes
 from app.cleaner import clean_items_with_metadata
 from app.collectors import collect_xiaohongshu
-from app.data_sources import run_data_source_import
+from app.data_sources import import_chanmama_file, run_data_source_import
 from app.memory import SimpleMemory
 from app.utils import load_latest_search_results
 from app.video import analyze_local_video
 from app.workflow.evidence import build_evidence_pack
 from app.workflow.performance import build_performance_summary
-from app.workflow.router import route_from_state
+from app.workflow.router import VALID_ROUTES, route_from_state
 from app.source_summary import build_source_summary
 from app.workflow.state import WorkflowState, create_initial_state
 from app.workflow.trace import NODE_CONTRACTS, ProgressCallback, append_warning, run_node
@@ -31,6 +31,11 @@ from app.workflow.trace import NODE_CONTRACTS, ProgressCallback, append_warning,
 
 def plan_node(state: WorkflowState) -> WorkflowState:
     plan = PlanAgent().run(state.get("user_query", ""))
+    requested_route = state.get("requested_route")
+    if requested_route in VALID_ROUTES:
+        plan["route"] = requested_route
+    if state.get("reference_video_path"):
+        plan["reference_video_path"] = state["reference_video_path"]
     state.update(
         {
             "plan": plan,
@@ -114,8 +119,8 @@ def cleaner_node(state: WorkflowState) -> WorkflowState:
     return state
 
 
-def storage_node(state: WorkflowState, output_dir: str | Path = "outputs/storage") -> WorkflowState:
-    directory = Path(output_dir)
+def storage_node(state: WorkflowState, output_dir: str | Path | None = None) -> WorkflowState:
+    directory = Path(output_dir or state.get("artifact_output_dir") or "outputs/storage")
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "clean_items.json").write_text(
         json.dumps(state.get("clean_items", []), ensure_ascii=False, indent=2),
@@ -210,7 +215,68 @@ def video_pattern_extract_node(state: WorkflowState) -> WorkflowState:
 
 
 def commercial_data_import_node(state: WorkflowState, source: str = "chanmama", path: str | Path | None = None) -> WorkflowState:
-    state["commercial_import_summary"] = run_data_source_import(source, path=path or "watched_imports/chanmama")
+    source_path = Path(path or state.get("commercial_data_path") or "watched_imports/chanmama")
+    if source == "chanmama" and source_path.is_file():
+        record = import_chanmama_file(source_path)
+        state["commercial_import_summary"] = {
+            "source": source,
+            "record_count": 1,
+            "records": [record],
+            "provenance": [record.get("provenance", {})],
+        }
+    else:
+        state["commercial_import_summary"] = run_data_source_import(source, path=source_path)
+    return state
+
+
+def commercial_report_node(
+    state: WorkflowState,
+    output_dir: str | Path = "outputs/final_package",
+) -> WorkflowState:
+    """Write a useful import receipt for the commercial-data dry-run route."""
+    directory = Path(output_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    summary = state.get("commercial_import_summary") or {}
+    records = summary.get("records") or []
+    lines = [
+        "# Commercial data import report",
+        "",
+        f"- Source: {summary.get('source') or 'unknown'}",
+        f"- Imported files: {summary.get('record_count') or 0}",
+        "",
+        "## Files",
+        "",
+    ]
+    if records:
+        for record in records:
+            status = record.get("status") or "unknown"
+            entity = record.get("detected_entity_type") or "unknown"
+            count = record.get("record_count") or 0
+            source_path = record.get("input_file") or (record.get("provenance") or {}).get("path") or "unknown"
+            lines.append(f"- `{source_path}` — {status}, {entity}, {count} records")
+    else:
+        lines.append("- No importable files were found.")
+    markdown = "\n".join(lines) + "\n"
+    report_path = directory / "trend_report.md"
+    report_path.write_text(markdown, encoding="utf-8")
+    manifest_path = directory / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "run_id": state.get("run_id"),
+                "route": state.get("route"),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "report": str(report_path),
+                "commercial_import": summary,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    state["final_report"] = markdown
+    state["report_path"] = str(report_path)
+    state["manifest_path"] = str(manifest_path)
     return state
 
 
@@ -268,8 +334,14 @@ def clean_items(raw_items: list[dict]) -> list[dict]:
     return clean_notes(raw_items)
 
 
-def run_workflow_legacy(user_query: str, output_dir: str | Path = "outputs/final_package") -> WorkflowState:
-    state = create_initial_state(user_query)
+def run_workflow_legacy(
+    user_query: str,
+    output_dir: str | Path = "outputs/final_package",
+    *,
+    route_override: str | None = None,
+    input_overrides: dict | None = None,
+) -> WorkflowState:
+    state = create_initial_state(user_query, route_override=route_override, input_overrides=input_overrides)
     state = _run_workflow_node(state, "plan", plan_node)
     route = route_from_state(state)
     state["route"] = route
@@ -283,10 +355,15 @@ def run_workflow_legacy(user_query: str, output_dir: str | Path = "outputs/final
 
     state = _run_workflow_node(state, "memory_load", memory_load_node)
 
+    if route == "commercial_data_analysis_path":
+        state = _run_workflow_node(state, "commercial_data_import", commercial_data_import_node)
+        state = _run_workflow_node(state, "commercial_report", commercial_report_node, output_dir)
+        return trace_writer_node(state, output_dir)
+
     if route == "full_pipeline_path":
         state = _run_workflow_node(state, "collect", collector_node)
         state = _run_workflow_node(state, "clean", cleaner_node)
-        state = _run_workflow_node(state, "store", storage_node)
+        state = _run_workflow_node(state, "store", storage_node, output_dir)
         state = _run_workflow_node(state, "trend_analyze", trend_analyze_node)
         state = _run_workflow_node(state, "pattern_extract", pattern_extract_node)
         state = _run_workflow_node(state, "evidence_pack", evidence_pack_node)
@@ -325,13 +402,24 @@ def run_workflow(
     user_query: str,
     output_dir: str | Path = "outputs/final_package",
     progress_callback: ProgressCallback | None = None,
+    *,
+    route_override: str | None = None,
+    input_overrides: dict | None = None,
 ) -> WorkflowState:
     from app.workflow.langgraph_runner import run_workflow_langgraph
 
-    return run_workflow_langgraph(user_query, output_dir, progress_callback=progress_callback)
+    return run_workflow_langgraph(
+        user_query,
+        output_dir,
+        progress_callback=progress_callback,
+        route_override=route_override,
+        input_overrides=input_overrides,
+    )
 
 
 def _selected_agents(route: str) -> list[str]:
+    if route == "commercial_data_analysis_path":
+        return ["CommercialDataImporter"]
     agents = ["TrendAnalyzerAgent", "PatternExtractorAgent"]
     if route in {"imitation_plan_path", "full_pipeline_path"}:
         agents.extend(["ImitationPlannerAgent", "ReviewAgent"])
@@ -340,6 +428,8 @@ def _selected_agents(route: str) -> list[str]:
 
 
 def _execution_path(route: str) -> list[str]:
+    if route == "commercial_data_analysis_path":
+        return ["plan", "memory_load", "commercial_data_import", "commercial_report", "trace"]
     if route == "full_pipeline_path":
         return [
             "plan",

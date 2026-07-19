@@ -26,6 +26,11 @@ stages:
       - no live collection
       - provenance is present
       - import records are produced
+  - name: commercial_report
+    required_inputs: [commercial_import_summary]
+    produces: [final_report, report_path, manifest_path]
+    quality_gates:
+      - an import receipt is written
   - name: trace
     required_inputs: [trace_nodes]
     produces: [agent_trace, trace_path]

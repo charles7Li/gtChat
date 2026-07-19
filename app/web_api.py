@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import json
+import hmac
+import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from app.agents.plan_agent import PlanAgent
 from app.collectors.douyin_minimal import DEFAULT_COOKIE_PATH as DOUYIN_COOKIE_PATH
 from app.data_sources import import_chanmama_file, run_data_source_import
 from app.monitor import run_background_once, run_monitor_tick
+from app.mobile_api import create_mobile_router
 from app.notifications import build_monitor_digest
 from app.video import analyze_local_video
 from app.workflow import run_workflow
@@ -24,6 +30,10 @@ UPLOADS_DIR = Path("uploads")
 MONITOR_DIR = Path("monitor_jobs")
 REPORT_ROOT = Path("outputs")
 XHS_COOKIE_PATH = Path(".profiles/xiaohongshu/default.cookies.json")
+ALLOWED_UPLOAD_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".csv", ".json"}
+JOB_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+_REPORT_CACHE_LOCK = Lock()
+_REPORT_CACHE: tuple[str, float, list[Path]] = ("", 0.0, [])
 
 
 class ChatRunRequest(BaseModel):
@@ -72,7 +82,7 @@ class HotspotRuleModel(BaseModel):
 
 
 class MonitorJobRequest(BaseModel):
-    job_id: str | None = None
+    job_id: str | None = Field(default=None, pattern=JOB_ID_PATTERN)
     name: str
     enabled: bool = True
     platforms: list[str] = Field(default_factory=list)
@@ -89,6 +99,8 @@ class LoginStateRequest(BaseModel):
 
 
 def create_app() -> FastAPI:
+    if os.getenv("MOCHI_ENV", "development").lower() == "production" and not os.getenv("MOCHI_WEB_ADMIN_TOKEN"):
+        raise RuntimeError("MOCHI_WEB_ADMIN_TOKEN is required in production")
     app = FastAPI(title="Mochi Scout Web API")
     app.add_middleware(
         CORSMiddleware,
@@ -96,17 +108,28 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.include_router(create_mobile_router())
+
+    @app.middleware("http")
+    async def protect_web_api(request: Request, call_next):
+        token = os.getenv("MOCHI_WEB_ADMIN_TOKEN")
+        if token and request.url.path.startswith("/api/") and not request.url.path.startswith("/api/v1/mobile/"):
+            supplied = request.headers.get("x-mochi-admin-token", "")
+            if not hmac.compare_digest(supplied, token):
+                return JSONResponse(status_code=401, content={"detail": "admin authentication required"})
+        return await call_next(request)
 
     @app.post("/api/chat/runs")
     def create_chat_run(request: ChatRunRequest) -> dict[str, Any]:
         planned_route = PlanAgent().run(request.query).get("route")
         if planned_route == "full_pipeline_path" and not request.allow_live:
             raise HTTPException(status_code=400, detail="full_pipeline_path requires allow_live=true")
-        output_dir = Path(request.output_dir) if request.output_dir else RUNS_DIR / _run_dir_name()
+        output_dir = _managed_output_path(request.output_dir, RUNS_DIR, _run_dir_name())
         try:
             state = run_workflow(request.query, output_dir)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            raise HTTPException(status_code=500, detail=_public_error("workflow failed", exc)) from exc
+        _invalidate_report_cache()
         return _run_response(state, "success")
 
     @app.get("/api/runs/{run_id}")
@@ -120,9 +143,27 @@ def create_app() -> FastAPI:
     async def upload_asset(request: Request, filename: str = Query("upload.bin")) -> UploadAsset:
         asset_id = uuid4().hex
         filename = Path(filename).name
+        suffix = Path(filename).suffix.lower()
+        if not filename or suffix not in ALLOWED_UPLOAD_SUFFIXES:
+            raise HTTPException(status_code=400, detail="unsupported file type")
         target = UPLOADS_DIR / asset_id / filename
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(await request.body())
+        temporary = target.with_name(f".{target.name}.part")
+        size = 0
+        max_bytes = _max_upload_bytes()
+        try:
+            with temporary.open("wb") as handle:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise HTTPException(status_code=413, detail="file exceeds upload limit")
+                    handle.write(chunk)
+            if size == 0:
+                raise HTTPException(status_code=400, detail="uploaded file is empty")
+            temporary.replace(target)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
         content_type = request.headers.get("content-type") or "application/octet-stream"
         return UploadAsset(
             asset_id=asset_id,
@@ -135,11 +176,16 @@ def create_app() -> FastAPI:
 
     @app.post("/api/video/analyze")
     def analyze_video(request: VideoAnalyzeRequest) -> dict[str, Any]:
-        output_dir = request.output_dir or str(Path("outputs/video_analysis") / _stamp())
+        source_path = _managed_input_file(request.path, [UPLOADS_DIR, REPORT_ROOT])
+        output_dir = _managed_output_path(
+            request.output_dir,
+            REPORT_ROOT / "video_analysis",
+            _stamp(),
+        )
         try:
             return analyze_local_video(
-                request.path,
-                output_dir=output_dir,
+                str(source_path),
+                output_dir=str(output_dir),
                 max_keyframes=request.max_keyframes,
                 transcribe=request.transcribe,
             )
@@ -148,19 +194,27 @@ def create_app() -> FastAPI:
 
     @app.post("/api/imports")
     def create_import(request: ImportRequest) -> dict[str, Any]:
-        if request.source == "chanmama" and request.path and Path(request.path).is_file():
-            record = import_chanmama_file(request.path)
+        managed_path = _managed_input_file(request.path, [UPLOADS_DIR]) if request.path else None
+        if request.source == "chanmama" and managed_path and managed_path.is_file():
+            record = import_chanmama_file(managed_path)
             return {"source": request.source, "record_count": record.get("record_count", 0), "records": [record], "provenance": [record.get("provenance", {})]}
-        return run_data_source_import(request.source, path=request.path)
+        return run_data_source_import(request.source, path=managed_path)
 
     @app.post("/api/monitor/ticks")
     def create_monitor_tick(request: MonitorTickRequest) -> dict[str, Any]:
-        return run_monitor_tick(**request.model_dump())
+        data = request.model_dump()
+        data["snapshot_path"] = str(_managed_input_file(request.snapshot_path, [UPLOADS_DIR, MONITOR_DIR]))
+        data["state_dir"] = str(_managed_directory(request.state_dir, MONITOR_DIR / "state"))
+        data["queue_db"] = str(_managed_file_path(request.queue_db, MONITOR_DIR / "events.db"))
+        return run_monitor_tick(**data)
 
     @app.post("/api/monitor/jobs")
     def create_monitor_job(request: MonitorJobRequest) -> dict[str, Any]:
         data = request.model_dump()
         data["job_id"] = data["job_id"] or uuid4().hex[:12]
+        data["output_dir"] = str(_managed_output_path(data.get("output_dir"), REPORT_ROOT / "hotspot", data["job_id"]))
+        if data.get("signals_path"):
+            data["signals_path"] = str(_managed_input_file(data["signals_path"], [UPLOADS_DIR, MONITOR_DIR]))
         path = _job_path(data["job_id"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -178,20 +232,23 @@ def create_app() -> FastAPI:
 
     @app.post("/api/monitor/jobs/{job_id}/run-once")
     def run_monitor_job_once(job_id: str) -> dict[str, Any]:
+        _validate_job_id(job_id)
         path = _job_path(job_id)
         if not path.exists():
             raise HTTPException(status_code=404, detail="job not found")
         data = json.loads(path.read_text(encoding="utf-8"))
         signals_path = data.get("signals_path") or _empty_signals_file(job_id)
-        return run_background_once(
+        result = run_background_once(
             config_path=path,
             signals_path=signals_path,
             output_dir=data.get("output_dir") or "outputs/hotspot",
         )
+        _invalidate_report_cache()
+        return result
 
     @app.get("/api/monitor/digest")
-    def monitor_digest(state_dir: str = "monitor_state", limit: int = 20) -> dict[str, Any]:
-        return build_monitor_digest(state_dir, limit=limit)
+    def monitor_digest(state_dir: str = "state", limit: int = Query(20, ge=1, le=200)) -> dict[str, Any]:
+        return build_monitor_digest(_managed_directory(state_dir, MONITOR_DIR / "state"), limit=limit)
 
     @app.get("/api/auth/status")
     def auth_status() -> dict[str, Any]:
@@ -209,8 +266,11 @@ def create_app() -> FastAPI:
         return _login_state_summary(platform, path)
 
     @app.get("/api/reports")
-    def list_reports() -> list[dict[str, Any]]:
-        return [_report_summary(path) for path in _report_dirs()]
+    def list_reports(
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+    ) -> list[dict[str, Any]]:
+        return [_report_summary(path) for path in _report_dirs()[offset : offset + limit]]
 
     @app.get("/api/reports/{run_id}")
     def get_report(run_id: str) -> dict[str, Any]:
@@ -299,13 +359,29 @@ def _report_summary(path: Path) -> dict[str, Any]:
 
 
 def _report_dirs() -> list[Path]:
+    global _REPORT_CACHE
     if not REPORT_ROOT.exists():
         return []
-    return sorted(
-        {path.parent for path in REPORT_ROOT.rglob("manifest.json")} | {path.parent for path in REPORT_ROOT.rglob("trend_report.md")},
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
+    root_key = str(REPORT_ROOT.resolve())
+    now = monotonic()
+    with _REPORT_CACHE_LOCK:
+        cached_root, cached_at, cached_paths = _REPORT_CACHE
+        if cached_root == root_key and now - cached_at < 5:
+            return list(cached_paths)
+        paths = sorted(
+            {path.parent for path in REPORT_ROOT.rglob("manifest.json")}
+            | {path.parent for path in REPORT_ROOT.rglob("trend_report.md")},
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        _REPORT_CACHE = (root_key, now, paths)
+        return list(paths)
+
+
+def _invalidate_report_cache() -> None:
+    global _REPORT_CACHE
+    with _REPORT_CACHE_LOCK:
+        _REPORT_CACHE = ("", 0.0, [])
 
 
 def _find_run_dir(run_id: str) -> Path | None:
@@ -317,10 +393,12 @@ def _find_run_dir(run_id: str) -> Path | None:
 
 
 def _job_path(job_id: str) -> Path:
+    _validate_job_id(job_id)
     return MONITOR_DIR / f"{job_id}.json"
 
 
 def _empty_signals_file(job_id: str) -> str:
+    _validate_job_id(job_id)
     path = MONITOR_DIR / f"{job_id}.signals.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
@@ -384,3 +462,81 @@ def _login_state_summary(platform: str, path: Path) -> dict[str, Any]:
         "cookie_count": count,
         "updated_at": _mtime(path),
     }
+
+
+def _managed_input_file(path: str | Path, roots: list[Path]) -> Path:
+    target = Path(path).resolve()
+    if not _allow_arbitrary_local_paths():
+        resolved_roots = [root.resolve() for root in roots]
+        if not any(target == root or root in target.parents for root in resolved_roots):
+            raise HTTPException(status_code=400, detail="file is outside managed storage")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="file not found")
+    return target
+
+
+def _managed_output_path(requested: str | Path | None, root: Path, default_name: str) -> Path:
+    resolved_root = root.resolve()
+    if requested is None:
+        return resolved_root / default_name
+    candidate = Path(requested)
+    if not candidate.is_absolute():
+        direct = candidate.resolve()
+        candidate = direct if direct == resolved_root or resolved_root in direct.parents else resolved_root / candidate
+    target = candidate.resolve()
+    if not _allow_arbitrary_local_paths() and target != resolved_root and resolved_root not in target.parents:
+        raise HTTPException(status_code=400, detail="output directory is outside managed storage")
+    return target
+
+
+def _managed_directory(requested: str | Path, default: Path) -> Path:
+    root = default.parent.resolve()
+    candidate = Path(requested)
+    if not candidate.is_absolute():
+        direct = candidate.resolve()
+        candidate = direct if direct == root or root in direct.parents else root / candidate
+    target = candidate.resolve()
+    if not _allow_arbitrary_local_paths() and target != root and root not in target.parents:
+        raise HTTPException(status_code=400, detail="directory is outside managed storage")
+    return target
+
+
+def _managed_file_path(requested: str | Path, default: Path) -> Path:
+    root = default.parent.resolve()
+    candidate = Path(requested)
+    if not candidate.is_absolute():
+        direct = candidate.resolve()
+        candidate = direct if direct == root or root in direct.parents else root / candidate
+    target = candidate.resolve()
+    if not _allow_arbitrary_local_paths() and target != root and root not in target.parents:
+        raise HTTPException(status_code=400, detail="file path is outside managed storage")
+    return target
+
+
+def _validate_job_id(job_id: str) -> None:
+    if re.fullmatch(JOB_ID_PATTERN, job_id) is None:
+        raise HTTPException(status_code=400, detail="invalid job id")
+
+
+def _max_upload_bytes() -> int:
+    try:
+        value = int(os.getenv("MOCHI_WEB_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+    except ValueError as exc:
+        raise RuntimeError("MOCHI_WEB_MAX_UPLOAD_BYTES must be an integer") from exc
+    if value <= 0:
+        raise RuntimeError("MOCHI_WEB_MAX_UPLOAD_BYTES must be positive")
+    return value
+
+
+def _allow_arbitrary_local_paths() -> bool:
+    return os.getenv("MOCHI_WEB_ALLOW_ARBITRARY_LOCAL_PATHS", "").lower() in {"1", "true", "yes"}
+
+
+def _is_production() -> bool:
+    return os.getenv("MOCHI_ENV", "development").lower() == "production"
+
+
+def _public_error(message: str, exc: Exception) -> str:
+    if os.getenv("MOCHI_DEBUG", "").lower() in {"1", "true", "yes"}:
+        return f"{message}: {exc}"
+    return message

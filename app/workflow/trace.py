@@ -177,6 +177,10 @@ NODE_CONTRACTS: dict[str, dict[str, list[NodeHook]]] = {
     "commercial_data_import": {
         "after": [warn_missing_outputs("commercial_import_summary")],
     },
+    "commercial_report": {
+        "before": [require_state_keys("commercial_import_summary")],
+        "after": [warn_missing_outputs("final_report", "report_path", "manifest_path")],
+    },
     "clean": {
         "before": [require_state_keys("raw_items")],
         "after": [warn_missing_outputs("clean_items", "dropped_items", "data_quality")],
