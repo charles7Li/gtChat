@@ -29,6 +29,7 @@ node_modules/
 dist/
 *.tsbuildinfo
 frontend/.vite-dev.*.log
+miniprogram/.swc/
 
 # Local environment and editor files
 .env
