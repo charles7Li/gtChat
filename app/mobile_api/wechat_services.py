@@ -13,7 +13,9 @@ from .settings import MobileSettings
 
 
 class WeChatApiError(RuntimeError):
-    pass
+    def __init__(self, message: str, errcode: int | None = None) -> None:
+        super().__init__(message)
+        self.errcode = errcode
 
 
 class ContentSafetyRejected(ValueError):
@@ -56,7 +58,7 @@ class WeChatServerApi:
             {
                 "touser": openid,
                 "template_id": template_id,
-                "page": f"pages/tasks/detail/index?id={urllib.parse.quote(str(job['id']))}",
+                "page": f"pages/job-detail/index?id={urllib.parse.quote(str(job['id']))}",
                 "miniprogram_state": "formal" if self.settings.wechat_auth_mode == "wechat" else "developer",
                 "lang": "zh_CN",
                 "data": data,
@@ -64,9 +66,22 @@ class WeChatServerApi:
         )
 
     def _authorized_post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        token = self._get_access_token()
         separator = "&" if "?" in path else "?"
-        return self._post_json(f"https://api.weixin.qq.com{path}{separator}access_token={urllib.parse.quote(token)}", payload)
+        for attempt in range(2):
+            token = self._get_access_token()
+            try:
+                return self._post_json(
+                    f"https://api.weixin.qq.com{path}{separator}access_token={urllib.parse.quote(token)}",
+                    payload,
+                )
+            except WeChatApiError as exc:
+                if attempt == 0 and exc.errcode in {40001, 40014, 42001}:
+                    with self._token_lock:
+                        self._access_token = ""
+                        self._access_token_expires_at = 0.0
+                    continue
+                raise
+        raise WeChatApiError("WeChat access token refresh failed")
 
     def _get_access_token(self) -> str:
         now = time.monotonic()
@@ -110,7 +125,7 @@ class WeChatServerApi:
             raise WeChatApiError("WeChat server API returned an invalid response")
         errcode = int(result.get("errcode") or 0)
         if errcode:
-            raise WeChatApiError(f"WeChat server API rejected the request ({errcode})")
+            raise WeChatApiError(f"WeChat server API rejected the request ({errcode})", errcode)
         return result
 
 

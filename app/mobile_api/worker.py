@@ -12,14 +12,15 @@ def main() -> None:
     parser.add_argument("--interval", type=float, default=2.0)
     args = parser.parse_args()
     runtime = MobileRuntime()
+    runtime.store.heartbeat(runtime.worker_id, "database-worker")
     if args.once:
         runtime.run_next_job()
         return
     while True:
+        runtime.store.heartbeat(runtime.worker_id, "database-worker")
         if runtime.run_next_job() is None:
             time.sleep(max(args.interval, 0.2))
 
 
 if __name__ == "__main__":
     main()
-

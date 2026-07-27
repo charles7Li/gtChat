@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
 import secrets
 import sqlite3
-import base64
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from .request_context import get_request_id
 
 
 class MobileStore:
@@ -20,26 +23,38 @@ class MobileStore:
         *,
         outbox_topic: str | None = None,
         notifications_enabled: bool = False,
+        previous_identity_secrets: tuple[str, ...] = (),
     ) -> None:
         self.db_path = Path(db_path)
         self.identity_secret = identity_secret.encode("utf-8")
+        self.previous_identity_secrets = tuple(secret.encode("utf-8") for secret in previous_identity_secrets)
         self.outbox_topic = outbox_topic
         self.notifications_enabled = notifications_enabled
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def create_or_get_user(self, openid: str) -> dict[str, Any]:
-        identity_hash = hmac.new(self.identity_secret, openid.encode("utf-8"), hashlib.sha256).hexdigest()
+        identity_hashes = [
+            hmac.new(secret, openid.encode("utf-8"), hashlib.sha256).hexdigest()
+            for secret in (self.identity_secret, *self.previous_identity_secrets)
+        ]
+        identity_hash = identity_hashes[0]
         openid_ciphertext = self._encrypt_openid(openid)
         now = _now()
         with self._connect() as conn:
-            row = conn.execute("select * from users where identity_hash = ?", (identity_hash,)).fetchone()
+            placeholders = ",".join("?" for _ in identity_hashes)
+            row = conn.execute(
+                f"select * from users where identity_hash in ({placeholders}) order by created_at limit 1",
+                tuple(identity_hashes),
+            ).fetchone()
             if row:
                 if row["status"] != "active":
                     raise PermissionError("account is not active")
-                if not row["openid_ciphertext"]:
-                    conn.execute("update users set openid_ciphertext = ?, updated_at = ? where id = ?", (openid_ciphertext, now, row["id"]))
-                return dict(row)
+                conn.execute(
+                    "update users set identity_hash = ?, openid_ciphertext = ?, updated_at = ? where id = ?",
+                    (identity_hash, openid_ciphertext, now, row["id"]),
+                )
+                return {**dict(row), "identity_hash": identity_hash, "openid_ciphertext": openid_ciphertext, "updated_at": now}
             user_id = f"usr_{uuid4().hex}"
             conn.execute(
                 "insert into users (id, identity_hash, openid_ciphertext, status, created_at, updated_at) values (?, ?, ?, 'active', ?, ?)",
@@ -57,6 +72,26 @@ class MobileStore:
     def create_session(self, user_id: str, access_ttl: int, refresh_ttl: int) -> dict[str, Any]:
         with self._connect() as conn:
             return self._create_session(conn, user_id, access_ttl, refresh_ttl)
+
+    def consume_rate_limit(self, scope: str, subject: str, limit: int, window_seconds: int = 60) -> bool:
+        bucket = int(time.time()) // max(window_seconds, 1)
+        bucket_key = hashlib.sha256(f"{scope}:{subject}:{bucket}".encode("utf-8")).hexdigest()
+        expires_at = datetime.fromtimestamp((bucket + 2) * window_seconds, timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute("begin immediate")
+            if bucket % 100 == 0:
+                conn.execute("delete from rate_limits where expires_at < ?", (_now(),))
+            row = conn.execute("select count from rate_limits where bucket_key = ?", (bucket_key,)).fetchone()
+            if not row:
+                conn.execute(
+                    "insert into rate_limits (bucket_key, count, expires_at) values (?, 1, ?)",
+                    (bucket_key, expires_at),
+                )
+                return True
+            if int(row["count"]) >= limit:
+                return False
+            conn.execute("update rate_limits set count = count + 1 where bucket_key = ?", (bucket_key,))
+            return True
 
     def _create_session(
         self,
@@ -149,6 +184,15 @@ class MobileStore:
                 "update assets set status = 'uploaded', size = ?, updated_at = ? where id = ? and user_id = ?",
                 (actual_size, _now(), asset_id, user_id),
             )
+            self._record_audit(conn, user_id, "asset_uploaded", {"asset_id": asset_id, "size": actual_size})
+        return self.get_asset(user_id, asset_id)
+
+    def reject_asset(self, user_id: str, asset_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.execute(
+                "update assets set status = 'rejected', updated_at = ? where id = ? and user_id = ?",
+                (_now(), asset_id, user_id),
+            )
         return self.get_asset(user_id, asset_id)
 
     def create_job(
@@ -199,6 +243,7 @@ class MobileStore:
             )
             row = conn.execute("select * from jobs where id = ?", (job_id,)).fetchone()
             self._enqueue_job_event(conn, job_id, user_id, 0)
+            self._record_audit(conn, user_id, "job_created", {"job_id": job_id, "route": route})
             return _job_from_row(row), True
 
     def list_jobs(self, user_id: str, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
@@ -261,6 +306,43 @@ class MobileStore:
             if updated != 1:
                 return None
             return _job_from_row(conn.execute("select * from jobs where id = ?", (job_id,)).fetchone())
+
+    def renew_job_lease(self, job_id: str, worker_id: str, lease_seconds: int = 300) -> bool:
+        now = datetime.now(timezone.utc)
+        lease_until = (now + timedelta(seconds=max(lease_seconds, 30))).isoformat()
+        with self._connect() as conn:
+            updated = conn.execute(
+                "update jobs set lease_until = ?, updated_at = ? "
+                "where id = ? and status = 'running' and worker_id = ?",
+                (lease_until, now.isoformat(), job_id, worker_id),
+            ).rowcount
+            return updated == 1
+
+    def recover_expired_jobs(self, limit: int = 100) -> int:
+        """Requeue abandoned jobs and emit replacement Kafka events atomically."""
+        now = _now()
+        recovered = 0
+        with self._connect() as conn:
+            conn.execute("begin immediate")
+            rows = conn.execute(
+                "select id, user_id, retry_count from jobs "
+                "where status = 'running' and lease_until is not null and lease_until <= ? "
+                "order by updated_at limit ?",
+                (now, max(1, min(limit, 500))),
+            ).fetchall()
+            for row in rows:
+                updated = conn.execute(
+                    "update jobs set status = 'queued', worker_id = null, lease_until = null, "
+                    "progress_json = ?, updated_at = ? "
+                    "where id = ? and status = 'running' and lease_until <= ?",
+                    (json.dumps({"stage": "recovered", "percent": 0}), now, row["id"], now),
+                ).rowcount
+                if updated != 1:
+                    continue
+                self._enqueue_job_event(conn, str(row["id"]), str(row["user_id"]), int(row["retry_count"]))
+                self._record_audit(conn, str(row["user_id"]), "job_recovered", {"job_id": str(row["id"])})
+                recovered += 1
+        return recovered
 
     def claim_outbox(self, publisher_id: str, limit: int = 100, lease_seconds: int = 60) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc)
@@ -409,6 +491,10 @@ class MobileStore:
                     """,
                     (notification_id, now, now, job_id, job_id),
                 )
+            if updated == 1:
+                owner = conn.execute("select user_id from jobs where id = ?", (job_id,)).fetchone()
+                if owner:
+                    self._record_audit(conn, str(owner["user_id"]), "job_completed", {"job_id": job_id})
             return updated == 1
 
     def fail_job(self, job_id: str, code: str, message: str, worker_id: str | None = None) -> None:
@@ -467,6 +553,123 @@ class MobileStore:
                 "insert into consents (id, user_id, consent_type, version, granted, created_at) values (?, ?, ?, ?, ?, ?)",
                 (f"cns_{uuid4().hex}", user_id, consent_type, version, int(granted), _now()),
             )
+            self._record_audit(conn, user_id, "consent_updated", {"type": consent_type, "granted": bool(granted)})
+
+    def has_consent(self, user_id: str, consent_type: str, version: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                select granted from consents where user_id = ? and consent_type = ? and version = ?
+                order by created_at desc limit 1
+                """,
+                (user_id, consent_type, version),
+            ).fetchone()
+            return bool(row and row["granted"])
+
+    def record_audit(self, user_id: str | None, event_type: str, details: dict[str, Any] | None = None) -> None:
+        with self._connect() as conn:
+            self._record_audit(conn, user_id, event_type, details or {})
+
+    def export_user_data(self, user_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            user = conn.execute(
+                "select id, status, created_at, updated_at from users where id = ? and status = 'active'",
+                (user_id,),
+            ).fetchone()
+            if not user:
+                return None
+            assets = conn.execute(
+                "select id, filename, content_type, file_type, size, status, created_at, updated_at from assets where user_id = ? order by created_at",
+                (user_id,),
+            ).fetchall()
+            jobs = conn.execute("select * from jobs where user_id = ? order by created_at", (user_id,)).fetchall()
+            reports = conn.execute(
+                "select id, job_id, title, summary, markdown, created_at from reports where user_id = ? order by created_at",
+                (user_id,),
+            ).fetchall()
+            consents = conn.execute(
+                "select consent_type, version, granted, consumed_at, delivery_status, created_at from consents where user_id = ? order by created_at",
+                (user_id,),
+            ).fetchall()
+        exported = {
+            "exported_at": _now(),
+            "user": dict(user),
+            "assets": [dict(row) for row in assets],
+            "jobs": [_job_from_row(row) for row in jobs],
+            "reports": [dict(row) for row in reports],
+            "consents": [dict(row) for row in consents],
+        }
+        self.record_audit(user_id, "user_data_exported", {})
+        return exported
+
+    def operational_metrics(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            job_rows = conn.execute("select status, count(*) as total from jobs group by status").fetchall()
+            outbox = conn.execute(
+                "select count(*) as total, min(created_at) as oldest from outbox_events where status = 'pending'"
+            ).fetchone()
+            notifications = conn.execute(
+                "select status, count(*) as total from notification_outbox group by status"
+            ).fetchall()
+            heartbeats = conn.execute("select worker_id, worker_type, last_seen from worker_heartbeats").fetchall()
+        return {
+            "jobs": {str(row["status"]): int(row["total"]) for row in job_rows},
+            "outbox_pending": int(outbox["total"] if outbox else 0),
+            "outbox_oldest_age_seconds": _age_seconds(outbox["oldest"] if outbox else None),
+            "notifications": {str(row["status"]): int(row["total"]) for row in notifications},
+            "workers": [
+                {
+                    "worker_id": str(row["worker_id"]),
+                    "worker_type": str(row["worker_type"]),
+                    "age_seconds": _age_seconds(str(row["last_seen"])),
+                }
+                for row in heartbeats
+            ],
+        }
+
+    def heartbeat(self, worker_id: str, worker_type: str) -> None:
+        now = _now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into worker_heartbeats (worker_id, worker_type, last_seen) values (?, ?, ?)
+                on conflict (worker_id) do update set worker_type = excluded.worker_type, last_seen = excluded.last_seen
+                """,
+                (worker_id, worker_type, now),
+            )
+
+    def ping(self) -> bool:
+        with self._connect() as conn:
+            row = conn.execute("select 1 as ok").fetchone()
+            return bool(row and int(row["ok"]) == 1)
+
+    def run_maintenance(self, event_retention_days: int, audit_retention_days: int) -> dict[str, int]:
+        now = datetime.now(timezone.utc)
+        event_cutoff = (now - timedelta(days=max(event_retention_days, 1))).isoformat()
+        audit_cutoff = (now - timedelta(days=max(audit_retention_days, 1))).isoformat()
+        now_text = now.isoformat()
+        with self._connect() as conn:
+            outbox = conn.execute(
+                "delete from outbox_events where status = 'published' and published_at < ?", (event_cutoff,)
+            ).rowcount
+            notifications = conn.execute(
+                "delete from notification_outbox where status in ('sent', 'skipped', 'failed') and created_at < ?",
+                (event_cutoff,),
+            ).rowcount
+            sessions = conn.execute(
+                "delete from sessions where refresh_expires_at < ? or (revoked_at is not null and revoked_at < ?)",
+                (now_text, event_cutoff),
+            ).rowcount
+            rate_limits = conn.execute("delete from rate_limits where expires_at < ?", (now_text,)).rowcount
+            audits = conn.execute("delete from audit_events where created_at < ?", (audit_cutoff,)).rowcount
+            conn.execute("delete from worker_heartbeats where last_seen < ?", (event_cutoff,))
+        return {
+            "outbox": int(outbox),
+            "notifications": int(notifications),
+            "sessions": int(sessions),
+            "rate_limits": int(rate_limits),
+            "audits": int(audits),
+        }
 
     def claim_notification(self, worker_id: str, lease_seconds: int = 60) -> dict[str, Any] | None:
         now = datetime.now(timezone.utc)
@@ -572,6 +775,8 @@ class MobileStore:
             for table in ("consents", "reports", "jobs", "assets", "sessions"):
                 conn.execute(f"delete from {table} where user_id = ?", (user_id,))
             conn.execute("delete from users where id = ?", (user_id,))
+            self._record_audit(conn, None, "account_deleted", {})
+            conn.execute("update audit_events set user_id = null where user_id = ?", (user_id,))
             return keys
 
     def delete_user_data(self, user_id: str) -> list[str]:
@@ -581,6 +786,7 @@ class MobileStore:
             conn.execute("delete from notification_outbox where user_id = ?", (user_id,))
             for table in ("reports", "jobs", "assets"):
                 conn.execute(f"delete from {table} where user_id = ?", (user_id,))
+            self._record_audit(conn, user_id, "user_data_deleted", {})
             return keys
 
     def _owned_row(self, table: str, user_id: str, object_id: str) -> dict[str, Any] | None:
@@ -599,11 +805,13 @@ class MobileStore:
     def _decrypt_openid(self, ciphertext: str) -> str:
         from cryptography.fernet import Fernet, InvalidToken
 
-        key = base64.urlsafe_b64encode(hashlib.sha256(self.identity_secret).digest())
-        try:
-            return Fernet(key).decrypt(ciphertext.encode("ascii")).decode("utf-8")
-        except (InvalidToken, UnicodeDecodeError, ValueError) as exc:
-            raise RuntimeError("stored WeChat identity cannot be decrypted") from exc
+        for secret in (self.identity_secret, *self.previous_identity_secrets):
+            key = base64.urlsafe_b64encode(hashlib.sha256(secret).digest())
+            try:
+                return Fernet(key).decrypt(ciphertext.encode("ascii")).decode("utf-8")
+            except (InvalidToken, UnicodeDecodeError, ValueError):
+                continue
+        raise RuntimeError("stored WeChat identity cannot be decrypted")
 
     def _enqueue_job_event(self, conn: Any, job_id: str, user_id: str, retry_count: int) -> None:
         if not self.outbox_topic:
@@ -627,6 +835,18 @@ class MobileStore:
             values (?, ?, 'mobile.job.queued', ?, ?, ?, 'pending', 0, ?, null, null, null, null, ?)
             """,
             (event_id, job_id, self.outbox_topic, job_id, json.dumps(payload, ensure_ascii=False), now, now),
+        )
+
+    @staticmethod
+    def _record_audit(
+        conn: Any,
+        user_id: str | None,
+        event_type: str,
+        details: dict[str, Any],
+    ) -> None:
+        conn.execute(
+            "insert into audit_events (id, user_id, event_type, request_id, details_json, created_at) values (?, ?, ?, ?, ?, ?)",
+            (f"aud_{uuid4().hex}", user_id, event_type, get_request_id(), json.dumps(details, ensure_ascii=False), _now()),
         )
 
     @staticmethod
@@ -684,6 +904,12 @@ class MobileStore:
                   id text primary key, user_id text, event_type text not null, request_id text,
                   details_json text not null, created_at text not null
                 );
+                create table if not exists rate_limits (
+                  bucket_key text primary key, count integer not null, expires_at text not null
+                );
+                create table if not exists worker_heartbeats (
+                  worker_id text primary key, worker_type text not null, last_seen text not null
+                );
                 create table if not exists outbox_events (
                   id text primary key, aggregate_id text not null, event_type text not null,
                   topic text not null, message_key text not null, payload_json text not null,
@@ -739,3 +965,13 @@ def _request_hash(query: str, route: str, asset_ids: list[str], allow_live: bool
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _age_seconds(value: str | None) -> int:
+    if not value:
+        return 0
+    try:
+        created = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return max(0, int((datetime.now(timezone.utc) - created).total_seconds()))
+    except ValueError:
+        return 0

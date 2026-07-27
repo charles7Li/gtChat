@@ -17,6 +17,7 @@ class NotificationWorker:
         self.worker_id = f"notify-{uuid4().hex[:12]}"
 
     def run_once(self) -> bool:
+        self.store.heartbeat(self.worker_id, "wechat-notifier")
         notification = self.store.claim_notification(self.worker_id)
         if not notification:
             return False

@@ -12,6 +12,7 @@ class UploadTarget:
     method: str = "PUT"
     headers: dict[str, str] | None = None
     direct: bool = False
+    fields: dict[str, str] | None = None
 
 
 class LocalObjectStore:
@@ -50,6 +51,9 @@ class LocalObjectStore:
         if target.exists():
             target.unlink()
 
+    def download_url(self, object_key: str) -> str:
+        return self.path(object_key).resolve().as_uri()
+
 
 class S3ObjectStore:
     """S3-compatible adapter suitable for COS, AWS S3, and MinIO."""
@@ -67,6 +71,7 @@ class S3ObjectStore:
         session_token: str = "",
         prefix: str = "mochi-scout",
         presign_ttl_seconds: int = 900,
+        max_upload_bytes: int = 50 * 1024 * 1024,
     ) -> None:
         if not bucket:
             raise ValueError("MOBILE_S3_BUCKET is required for s3 object storage")
@@ -89,17 +94,18 @@ class S3ObjectStore:
         self.bucket = bucket
         self.prefix = prefix.strip("/")
         self.presign_ttl_seconds = max(60, min(presign_ttl_seconds, 3600))
+        self.max_upload_bytes = max(1, max_upload_bytes)
 
     def upload_target(self, object_key: str, content_type: str, *, proxy_url: str) -> UploadTarget:
         key = self._key(object_key)
-        headers = {"content-type": content_type}
-        url = self.client.generate_presigned_url(
-            "put_object",
-            Params={"Bucket": self.bucket, "Key": key, "ContentType": content_type},
+        result = self.client.generate_presigned_post(
+            Bucket=self.bucket,
+            Key=key,
+            Fields={"Content-Type": content_type},
+            Conditions=[{"Content-Type": content_type}, ["content-length-range", 1, self.max_upload_bytes]],
             ExpiresIn=self.presign_ttl_seconds,
-            HttpMethod="PUT",
         )
-        return UploadTarget(url=url, headers=headers, direct=True)
+        return UploadTarget(url=str(result["url"]), method="POST", fields=dict(result["fields"]), direct=True)
 
     def exists(self, object_key: str) -> bool:
         try:
@@ -124,9 +130,16 @@ class S3ObjectStore:
     def delete(self, object_key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=self._key(object_key))
 
+    def download_url(self, object_key: str) -> str:
+        return self.client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": self._key(object_key)},
+            ExpiresIn=self.presign_ttl_seconds,
+            HttpMethod="GET",
+        )
+
     def _key(self, object_key: str) -> str:
         clean = object_key.replace("\\", "/").lstrip("/")
         if ".." in clean.split("/"):
             raise ValueError("unsafe object key")
         return f"{self.prefix}/{clean}" if self.prefix else clean
-

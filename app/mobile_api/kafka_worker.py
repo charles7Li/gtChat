@@ -55,6 +55,7 @@ def main() -> None:
         consumer.subscribe([runtime.settings.kafka_topic, runtime.settings.kafka_retry_topic])
     try:
         while True:
+            runtime.store.heartbeat(runtime.worker_id, f"kafka-{args.mode}")
             acted = False
             if args.mode in {"outbox", "all"}:
                 acted = bool(publisher.publish_once())

@@ -3,12 +3,14 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any, AsyncIterable, Callable
 from uuid import uuid4
 
 from app.workflow import run_workflow
 
 from .auth import WeChatGateway
+from .media_moderation import MediaModerationGateway, MediaModerationRejected
 from .object_store import LocalObjectStore, S3ObjectStore, UploadTarget
 from .postgres_store import PostgresMobileStore
 from .settings import MobileSettings
@@ -42,6 +44,7 @@ class MobileRuntime:
         workflow_runner: Callable[..., dict[str, Any]] = run_workflow,
         wechat_gateway: WeChatGateway | None = None,
         wechat_server_api: WeChatServerApi | None = None,
+        media_moderation_gateway: MediaModerationGateway | None = None,
     ) -> None:
         self.settings = settings or MobileSettings.from_env()
         self.settings.validate()
@@ -49,6 +52,7 @@ class MobileRuntime:
         self.objects = self._create_object_store()
         self.wechat = wechat_gateway or WeChatGateway(self.settings)
         self.wechat_server = wechat_server_api or WeChatServerApi(self.settings)
+        self.media_moderation = media_moderation_gateway or MediaModerationGateway(self.settings)
         self.workflow_runner = workflow_runner
         self.worker_id = f"mobile-{uuid4().hex[:12]}"
         self.settings.workflow_root.mkdir(parents=True, exist_ok=True)
@@ -62,12 +66,15 @@ class MobileRuntime:
                 self.settings.identity_secret,
                 outbox_topic=outbox_topic,
                 notifications_enabled=notifications_enabled,
+                initialize_schema=self.settings.auto_migrate,
+                previous_identity_secrets=self.settings.identity_previous_secrets,
             )
         return MobileStore(
             self.settings.db_path,
             self.settings.identity_secret,
             outbox_topic=outbox_topic,
             notifications_enabled=notifications_enabled,
+            previous_identity_secrets=self.settings.identity_previous_secrets,
         )
 
     def _create_object_store(self) -> LocalObjectStore | S3ObjectStore:
@@ -81,6 +88,7 @@ class MobileRuntime:
                 session_token=self.settings.s3_session_token,
                 prefix=self.settings.s3_prefix,
                 presign_ttl_seconds=self.settings.upload_url_ttl_seconds,
+                max_upload_bytes=self.settings.max_upload_bytes,
             )
         return LocalObjectStore(self.settings.object_root)
 
@@ -90,6 +98,7 @@ class MobileRuntime:
         session = self.store.create_session(
             user["id"], self.settings.access_token_ttl_seconds, self.settings.refresh_token_ttl_seconds
         )
+        self.store.record_audit(user["id"], "login_succeeded", {})
         return {**session, "user": {"id": user["id"], "status": user["status"]}}
 
     def refresh(self, refresh_token: str) -> dict[str, Any] | None:
@@ -127,7 +136,7 @@ class MobileRuntime:
         target = self.objects.path(asset["object_key"])
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
-        return self.store.complete_asset(user_id, asset_id, len(content)) or asset
+        return self._finish_asset_upload(user_id, asset, target, len(content))
 
     async def write_upload_stream(
         self,
@@ -158,12 +167,16 @@ class MobileRuntime:
         finally:
             if temporary.exists():
                 temporary.unlink()
-        return self.store.complete_asset(user_id, asset_id, size) or asset
+        return self._finish_asset_upload(user_id, asset, target, size)
 
     def complete_upload(self, user_id: str, asset_id: str) -> dict[str, Any]:
         asset = self.store.get_asset(user_id, asset_id)
         if not asset:
             raise FileNotFoundError("asset not found")
+        if asset["status"] == "uploaded":
+            return asset
+        if asset["status"] != "pending":
+            raise ValueError("asset is not awaiting completion")
         if not self.objects.exists(asset["object_key"]):
             raise ValueError("upload content is missing")
         actual_size = self.objects.size(asset["object_key"])
@@ -177,10 +190,31 @@ class MobileRuntime:
         try:
             self.objects.materialize(asset["object_key"], verification)
             _validate_file_content(asset["file_type"], asset["filename"], verification)
+            return self._finish_asset_upload(user_id, asset, verification, actual_size)
         finally:
             if verification.exists():
                 verification.unlink()
-        return self.store.complete_asset(user_id, asset_id, actual_size) or asset
+
+    def _finish_asset_upload(
+        self,
+        user_id: str,
+        asset: dict[str, Any],
+        verification_path: Path,
+        actual_size: int,
+    ) -> dict[str, Any]:
+        try:
+            if self.settings.wechat_content_security_enabled and asset["file_type"] in {"csv", "json"}:
+                openid = self.store.get_user_openid(user_id)
+                if not openid:
+                    raise RuntimeError("WeChat identity is unavailable for content safety")
+                self.wechat_server.check_text(openid, verification_path.read_text(encoding="utf-8-sig"))
+            if asset["file_type"] in {"image", "video"}:
+                self.media_moderation.check(asset, self.objects.download_url(asset["object_key"]))
+        except (ContentSafetyRejected, MediaModerationRejected):
+            self.objects.delete(asset["object_key"])
+            self.store.reject_asset(user_id, asset["id"])
+            raise
+        return self.store.complete_asset(user_id, asset["id"], actual_size) or asset
 
     def create_job(
         self,
@@ -193,6 +227,10 @@ class MobileRuntime:
     ) -> tuple[dict[str, Any], bool]:
         if route not in ALLOWED_ROUTES:
             raise ValueError("unsupported route")
+        if self.settings.require_legal_consent and not self.store.has_consent(
+            user_id, "terms_and_privacy", self.settings.legal_consent_version
+        ):
+            raise LegalConsentRequired("accept the current user agreement and privacy policy first")
         if allow_live:
             raise ValueError("live collection is not available in the mini program")
         for asset_id in asset_ids:
@@ -226,8 +264,29 @@ class MobileRuntime:
     def _run_claimed_job(self, job: dict[str, Any]) -> dict[str, Any] | None:
         output_dir = self.settings.workflow_root / job["user_id"] / job["id"]
         output_dir.mkdir(parents=True, exist_ok=True)
+        lease_stop = Event()
+        lease_lost = Event()
+
+        def keep_lease() -> None:
+            interval = max(5.0, min(self.settings.worker_lease_seconds / 3, 30.0))
+            while not lease_stop.wait(interval):
+                try:
+                    owned = self.store.renew_job_lease(
+                        job["id"], self.worker_id, self.settings.worker_lease_seconds
+                    )
+                except Exception:
+                    lease_lost.set()
+                    return
+                if not owned:
+                    lease_lost.set()
+                    return
+
+        lease_thread = Thread(target=keep_lease, name=f"lease-{job['id']}", daemon=True)
+        lease_thread.start()
 
         def progress(event: dict[str, Any]) -> None:
+            if lease_lost.is_set():
+                raise JobLeaseLost("job lease renewal failed")
             if self.store.is_cancel_requested(job["id"]):
                 raise JobCancelled("job cancelled by user")
             stage = str(event.get("node") or event.get("stage") or "running")
@@ -252,6 +311,8 @@ class MobileRuntime:
                 route_override=job["route"],
                 input_overrides=input_overrides,
             )
+            if lease_lost.is_set():
+                raise JobLeaseLost("job lease renewal failed")
             if self.store.is_cancel_requested(job["id"]):
                 raise JobCancelled("job cancelled by user")
             report_path = Path(str(state.get("report_path") or output_dir / "trend_report.md"))
@@ -285,6 +346,9 @@ class MobileRuntime:
             self.store.fail_job(job["id"], "CONTENT_REJECTED", str(exc), self.worker_id)
         except Exception as exc:
             self.store.fail_job(job["id"], "WORKFLOW_FAILED", _workflow_error_message(exc), self.worker_id)
+        finally:
+            lease_stop.set()
+            lease_thread.join(timeout=1)
         return self.store.get_job(job["user_id"], job["id"])
 
     def delete_user(self, user_id: str) -> None:
@@ -358,6 +422,10 @@ class JobLeaseLost(RuntimeError):
 
 
 class UploadTooLarge(ValueError):
+    pass
+
+
+class LegalConsentRequired(PermissionError):
     pass
 
 

@@ -1,0 +1,72 @@
+services:
+  preflight:
+    image: ${MOCHI_MOBILE_IMAGE:?set MOCHI_MOBILE_IMAGE}
+    env_file: ${MOBILE_ENV_FILE:-mobile.env}
+    command: ["python", "-m", "app.mobile_api.preflight"]
+    restart: "no"
+
+  migrate:
+    image: ${MOCHI_MOBILE_IMAGE:?set MOCHI_MOBILE_IMAGE}
+    env_file: ${MOBILE_ENV_FILE:-mobile.env}
+    command: ["python", "-m", "app.mobile_api.migrate"]
+    restart: "no"
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
+
+  api:
+    image: ${MOCHI_MOBILE_IMAGE:?set MOCHI_MOBILE_IMAGE}
+    env_file: ${MOBILE_ENV_FILE:-mobile.env}
+    command: ["uvicorn", "app.web_api:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/mobile/ready', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    stop_grace_period: 30s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  kafka-outbox:
+    image: ${MOCHI_MOBILE_IMAGE:?set MOCHI_MOBILE_IMAGE}
+    env_file: ${MOBILE_ENV_FILE:-mobile.env}
+    command: ["python", "-m", "app.mobile_api.kafka_worker", "outbox", "--interval", "1"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  kafka-worker:
+    image: ${MOCHI_MOBILE_IMAGE:?set MOCHI_MOBILE_IMAGE}
+    env_file: ${MOBILE_ENV_FILE:-mobile.env}
+    command: ["python", "-m", "app.mobile_api.kafka_worker", "worker", "--interval", "1"]
+    restart: unless-stopped
+    stop_grace_period: 120s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  wechat-notifier:
+    image: ${MOCHI_MOBILE_IMAGE:?set MOCHI_MOBILE_IMAGE}
+    env_file: ${MOBILE_ENV_FILE:-mobile.env}
+    command: ["python", "-m", "app.mobile_api.notification_worker", "--interval", "2"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  maintenance:
+    image: ${MOCHI_MOBILE_IMAGE:?set MOCHI_MOBILE_IMAGE}
+    env_file: ${MOBILE_ENV_FILE:-mobile.env}
+    command: ["python", "-m", "app.mobile_api.maintenance", "--interval", "3600"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully

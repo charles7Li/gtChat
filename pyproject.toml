@@ -27,6 +27,9 @@ mochi-scout = "app.cli:main"
 mochi-mobile-worker = "app.mobile_api.worker:main"
 mochi-mobile-kafka = "app.mobile_api.kafka_worker:main"
 mochi-mobile-notify = "app.mobile_api.notification_worker:main"
+mochi-mobile-migrate = "app.mobile_api.migrate:main"
+mochi-mobile-preflight = "app.mobile_api.preflight:main"
+mochi-mobile-maintenance = "app.mobile_api.maintenance:main"
 
 [tool.setuptools.packages.find]
 include = ["app*", "evals*", "pipeline_defs*"]

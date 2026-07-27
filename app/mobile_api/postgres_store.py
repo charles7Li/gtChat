@@ -21,6 +21,8 @@ class PostgresMobileStore(MobileStore):
         *,
         outbox_topic: str | None = None,
         notifications_enabled: bool = False,
+        initialize_schema: bool = True,
+        previous_identity_secrets: tuple[str, ...] = (),
         pool_min_size: int = 1,
         pool_max_size: int = 10,
     ) -> None:
@@ -30,6 +32,7 @@ class PostgresMobileStore(MobileStore):
             raise RuntimeError("PostgreSQL mobile store requires the mobile-prod dependency extra") from exc
         self.database_url = database_url
         self.identity_secret = identity_secret.encode("utf-8")
+        self.previous_identity_secrets = tuple(secret.encode("utf-8") for secret in previous_identity_secrets)
         self.outbox_topic = outbox_topic
         self.notifications_enabled = notifications_enabled
         self.pool = ConnectionPool(
@@ -39,16 +42,35 @@ class PostgresMobileStore(MobileStore):
             kwargs={"autocommit": False},
             open=True,
         )
-        self._init_db()
+        if initialize_schema:
+            self._init_db()
 
     def close(self) -> None:
         self.pool.close()
 
     def create_or_get_user(self, openid: str) -> dict[str, Any]:
         identity_hash = hmac.new(self.identity_secret, openid.encode("utf-8"), hashlib.sha256).hexdigest()
+        previous_hashes = [
+            hmac.new(secret, openid.encode("utf-8"), hashlib.sha256).hexdigest()
+            for secret in self.previous_identity_secrets
+        ]
         openid_ciphertext = self._encrypt_openid(openid)
         now = _now()
         with self._connect() as conn:
+            if previous_hashes:
+                placeholders = ",".join("?" for _ in previous_hashes)
+                previous = conn.execute(
+                    f"select * from users where identity_hash in ({placeholders}) order by created_at for update limit 1",
+                    tuple(previous_hashes),
+                ).fetchone()
+                if previous:
+                    row = conn.execute(
+                        "update users set identity_hash = ?, openid_ciphertext = ?, updated_at = ? where id = ? returning *",
+                        (identity_hash, openid_ciphertext, now, previous["id"]),
+                    ).fetchone()
+                    if row["status"] != "active":
+                        raise PermissionError("account is not active")
+                    return dict(row)
             row = conn.execute(
                 """
                 insert into users (id, identity_hash, openid_ciphertext, status, created_at, updated_at)
@@ -103,6 +125,7 @@ class PostgresMobileStore(MobileStore):
             ).fetchone()
             if row:
                 self._enqueue_job_event(conn, job_id, user_id, 0)
+                self._record_audit(conn, user_id, "job_created", {"job_id": job_id, "route": route})
                 return _job_from_row(row), True
             existing = conn.execute(
                 "select * from jobs where user_id = ? and idempotency_key = ? for update",
@@ -129,6 +152,53 @@ class PostgresMobileStore(MobileStore):
                 (json.dumps({"stage": "starting", "percent": 5}), worker_id, lease_until, now_text, job_id),
             ).fetchone()
             return _job_from_row(claimed) if claimed else None
+
+    def recover_expired_jobs(self, limit: int = 100) -> int:
+        now = _now()
+        recovered = 0
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select id, user_id, retry_count from jobs
+                where status = 'running' and lease_until is not null and lease_until <= ?
+                order by updated_at for update skip locked limit ?
+                """,
+                (now, max(1, min(limit, 500))),
+            ).fetchall()
+            for row in rows:
+                updated = conn.execute(
+                    """
+                    update jobs set status = 'queued', worker_id = null, lease_until = null,
+                      progress_json = ?, updated_at = ?
+                    where id = ? and status = 'running' and lease_until <= ?
+                    """,
+                    (json.dumps({"stage": "recovered", "percent": 0}), now, row["id"], now),
+                ).rowcount
+                if updated != 1:
+                    continue
+                self._enqueue_job_event(conn, str(row["id"]), str(row["user_id"]), int(row["retry_count"]))
+                self._record_audit(conn, str(row["user_id"]), "job_recovered", {"job_id": str(row["id"])})
+                recovered += 1
+        return recovered
+
+    def consume_rate_limit(self, scope: str, subject: str, limit: int, window_seconds: int = 60) -> bool:
+        import time
+
+        bucket = int(time.time()) // max(window_seconds, 1)
+        bucket_key = hashlib.sha256(f"{scope}:{subject}:{bucket}".encode("utf-8")).hexdigest()
+        expires_at = datetime.fromtimestamp((bucket + 2) * window_seconds, timezone.utc).isoformat()
+        with self._connect() as conn:
+            if bucket % 100 == 0:
+                conn.execute("delete from rate_limits where expires_at < ?", (_now(),))
+            row = conn.execute(
+                """
+                insert into rate_limits (bucket_key, count, expires_at) values (?, 1, ?)
+                on conflict (bucket_key) do update set count = rate_limits.count + 1
+                returning count
+                """,
+                (bucket_key, expires_at),
+            ).fetchone()
+            return int(row["count"]) <= limit
 
     def claim_outbox(self, publisher_id: str, limit: int = 100, lease_seconds: int = 60) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc)
@@ -272,6 +342,11 @@ def _postgres_placeholders(query: str) -> str:
 
 _SCHEMA = (
     """
+    create table if not exists mobile_schema_migrations (
+      version integer primary key, applied_at timestamptz not null default now()
+    )
+    """,
+    """
     create table if not exists users (
       id text primary key, identity_hash text not null unique, openid_ciphertext text, status text not null,
       created_at text not null, updated_at text not null, deleted_at text
@@ -340,6 +415,16 @@ _SCHEMA = (
     )
     """,
     """
+    create table if not exists rate_limits (
+      bucket_key text primary key, count integer not null, expires_at text not null
+    )
+    """,
+    """
+    create table if not exists worker_heartbeats (
+      worker_id text primary key, worker_type text not null, last_seen text not null
+    )
+    """,
+    """
     create table if not exists outbox_events (
       id text primary key, aggregate_id text not null, event_type text not null,
       topic text not null, message_key text not null, payload_json text not null,
@@ -348,4 +433,5 @@ _SCHEMA = (
     )
     """,
     "create index if not exists idx_mobile_outbox_pending on outbox_events(status, available_at, created_at)",
+    "insert into mobile_schema_migrations (version) values (1) on conflict (version) do nothing",
 )

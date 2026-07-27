@@ -26,6 +26,7 @@ def consumer_config(settings: MobileSettings) -> dict[str, Any]:
         "group.id": settings.kafka_group_id,
         "enable.auto.commit": False,
         "auto.offset.reset": "earliest",
+        "max.poll.interval.ms": settings.kafka_max_poll_interval_ms,
     }
     _add_security(config, settings)
     return config
@@ -56,22 +57,37 @@ class OutboxPublisher:
         self.publisher_id = publisher_id or f"outbox-{uuid4().hex[:12]}"
 
     def publish_once(self, limit: int = 100) -> int:
+        self.store.recover_expired_jobs(limit=limit)
         events = self.store.claim_outbox(self.publisher_id, limit=limit)
-        published = 0
+        if not events:
+            return 0
+        outcomes: dict[str, Exception | bool] = {event["id"]: False for event in events}
         for event in events:
+            def delivered(error: Any, _message: Any, *, event_id: str = event["id"]) -> None:
+                outcomes[event_id] = RuntimeError(str(error)) if error is not None else True
+
             try:
-                publish_json(
-                    self.producer,
-                    event["topic"],
-                    event["message_key"],
-                    event["payload"],
-                    headers={"event_id": event["id"], "event_type": event["event_type"]},
+                self.producer.produce(
+                    topic=event["topic"],
+                    key=event["message_key"].encode("utf-8"),
+                    value=json.dumps(event["payload"], ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                    headers=[("event_id", event["id"]), ("event_type", event["event_type"])],
+                    on_delivery=delivered,
                 )
             except Exception as exc:
-                self.store.release_outbox(event["id"], self.publisher_id, str(exc))
-            else:
+                outcomes[event["id"]] = exc
+        remaining = self.producer.flush(10)
+        published = 0
+        for event in events:
+            outcome = outcomes[event["id"]]
+            if outcome is True:
                 self.store.mark_outbox_published(event["id"], self.publisher_id)
                 published += 1
+            else:
+                error = outcome if isinstance(outcome, Exception) else TimeoutError(
+                    f"Kafka batch delivery incomplete ({remaining} pending)"
+                )
+                self.store.release_outbox(event["id"], self.publisher_id, str(error))
         return published
 
 
