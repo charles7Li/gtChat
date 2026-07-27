@@ -1,4 +1,5 @@
 import json
+import time
 
 from fastapi.testclient import TestClient
 
@@ -8,11 +9,15 @@ import app.web_api as web_api
 def test_chat_run_returns_workflow_artifacts(monkeypatch, tmp_path):
     monkeypatch.setattr(web_api, "RUNS_DIR", tmp_path / "runs")
 
-    def fake_run_workflow(query, output_dir):
+    def fake_run_workflow(query, output_dir, progress_callback=None):
         output_dir.mkdir(parents=True)
+        if progress_callback:
+            progress_callback({"phase": "start", "name": "plan", "started_at": "now"})
         (output_dir / "trend_report.md").write_text("# Report", encoding="utf-8")
+        if progress_callback:
+            progress_callback({"phase": "finish", "name": "plan", "status": "success", "started_at": "now", "ended_at": "now", "duration_ms": 1})
         return {
-            "run_id": "run-1",
+            "run_id": output_dir.name,
             "user_query": query,
             "route": "trend_report_path",
             "report_path": str(output_dir / "trend_report.md"),
@@ -26,8 +31,15 @@ def test_chat_run_returns_workflow_artifacts(monkeypatch, tmp_path):
     response = TestClient(web_api.create_app()).post("/api/chat/runs", json={"query": "trend report"})
 
     assert response.status_code == 200
-    assert response.json()["run_id"] == "run-1"
-    assert response.json()["report_path"].endswith("trend_report.md")
+    assert response.json()["run_id"]
+    run_id = response.json()["run_id"]
+    for _ in range(20):
+        state = TestClient(web_api.create_app()).get(f"/api/chat/runs/{run_id}").json()
+        if state["status"] == "success":
+            break
+        time.sleep(0.01)
+    assert state["status"] == "success"
+    assert state["report_path"].endswith("trend_report.md")
 
 
 def test_chat_run_default_output_dir_is_unique():
@@ -223,6 +235,25 @@ def test_auth_state_rejects_invalid_platform_and_cookie(monkeypatch, tmp_path):
 
     assert client.put("/api/auth/weibo", json={"cookies": [{"name": "a", "value": "b"}]}).status_code == 422
     assert client.put("/api/auth/xiaohongshu", json={"cookies": [{"value": "missing-name"}]}).status_code == 422
+
+
+def test_web_login_session_can_be_completed_without_cmd_input(monkeypatch, tmp_path):
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(web_api, "AUTH_SESSION_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(web_api.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    client = TestClient(web_api.create_app())
+
+    started = client.post("/api/auth/douyin/login")
+    assert started.status_code == 200
+    session_id = started.json()["session_id"]
+    assert client.get(f"/api/auth/sessions/{session_id}").json()["status"] == "running"
+    completed = client.post(f"/api/auth/sessions/{session_id}/complete")
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "completing"
+    assert (tmp_path / "sessions" / f"{session_id}.complete").exists()
 
 
 def test_web_api_rejects_unmanaged_local_paths(monkeypatch, tmp_path):

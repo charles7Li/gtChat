@@ -1,4 +1,4 @@
-export type RunStatus = "pending" | "running" | "success" | "failed" | "unknown";
+export type RunStatus = "pending" | "queued" | "running" | "success" | "failed" | "unknown";
 
 export type ThemeId = "ragdoll" | "siamese" | "calico" | "tabby";
 
@@ -15,6 +15,8 @@ export type ChatRun = {
   errors?: Array<Record<string, unknown>>;
   created_at: string;
   markdown?: string;
+  stages?: Array<{ name: string; status: string; started_at?: string; ended_at?: string; duration_ms?: number }>;
+  error?: string;
 };
 
 export type UploadAsset = {

@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 import hmac
+import logging
 import os
 import re
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -12,6 +16,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
@@ -21,6 +26,7 @@ from app.collectors.douyin_minimal import DEFAULT_COOKIE_PATH as DOUYIN_COOKIE_P
 from app.data_sources import import_chanmama_file, run_data_source_import
 from app.monitor import run_background_once, run_monitor_tick
 from app.mobile_api import create_mobile_router
+from app.mobile_api.request_context import reset_request_id, set_request_id
 from app.notifications import build_monitor_digest
 from app.video import analyze_local_video
 from app.workflow import run_workflow
@@ -34,6 +40,13 @@ ALLOWED_UPLOAD_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".pn
 JOB_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 _REPORT_CACHE_LOCK = Lock()
 _REPORT_CACHE: tuple[str, float, list[Path]] = ("", 0.0, [])
+_API_LOGGER = logging.getLogger("mochi.mobile_api")
+_AUTH_PROCESSES: dict[str, subprocess.Popen] = {}
+_AUTH_SESSIONS: dict[str, dict[str, Any]] = {}
+AUTH_SESSION_DIR = Path(".profiles/auth_sessions")
+_AUTH_SESSION_TTL_SECONDS = 10 * 60
+_RUN_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mochi-web-run")
+_RUN_STATE_FILENAME = "run_state.json"
 
 
 class ChatRunRequest(BaseModel):
@@ -110,6 +123,36 @@ def create_app() -> FastAPI:
     )
     app.include_router(create_mobile_router())
 
+    @app.exception_handler(HTTPException)
+    async def structured_http_error(request: Request, exc: HTTPException):
+        if request.url.path.startswith("/api/v1/mobile/") and isinstance(exc.detail, dict):
+            detail = dict(exc.detail)
+            detail.setdefault("request_id", getattr(request.state, "request_id", ""))
+            exc = HTTPException(status_code=exc.status_code, detail=detail, headers=exc.headers)
+        return await http_exception_handler(request, exc)
+
+    @app.middleware("http")
+    async def mobile_request_context(request: Request, call_next):
+        request_id = request.headers.get("x-request-id", "").strip()[:128] or f"req_{uuid4().hex}"
+        request.state.request_id = request_id
+        started = monotonic()
+        context_token = set_request_id(request_id)
+        try:
+            response = await call_next(request)
+            response.headers["x-request-id"] = request_id
+            if request.url.path.startswith("/api/v1/mobile/"):
+                _API_LOGGER.info(
+                    "mobile_request request_id=%s method=%s path=%s status=%s duration_ms=%d",
+                    request_id,
+                    request.method,
+                    request.url.path,
+                    response.status_code,
+                    int((monotonic() - started) * 1000),
+                )
+            return response
+        finally:
+            reset_request_id(context_token)
+
     @app.middleware("http")
     async def protect_web_api(request: Request, call_next):
         token = os.getenv("MOCHI_WEB_ADMIN_TOKEN")
@@ -124,13 +167,33 @@ def create_app() -> FastAPI:
         planned_route = PlanAgent().run(request.query).get("route")
         if planned_route == "full_pipeline_path" and not request.allow_live:
             raise HTTPException(status_code=400, detail="full_pipeline_path requires allow_live=true")
-        output_dir = _managed_output_path(request.output_dir, RUNS_DIR, _run_dir_name())
-        try:
-            state = run_workflow(request.query, output_dir)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=_public_error("workflow failed", exc)) from exc
-        _invalidate_report_cache()
-        return _run_response(state, "success")
+        run_id = _run_dir_name()
+        output_dir = _managed_output_path(request.output_dir, RUNS_DIR, run_id)
+        _write_run_state(output_dir, {
+            "run_id": run_id,
+            "query": request.query,
+            "route": planned_route or "",
+            "status": "queued",
+            "stages": [],
+            "created_at": _now(),
+        })
+        _RUN_EXECUTOR.submit(_execute_chat_run, request.query, output_dir, run_id)
+        return _run_response({"run_id": run_id, "user_query": request.query, "route": planned_route or ""}, "queued", output_dir=output_dir)
+
+    @app.get("/api/chat/runs/{run_id}")
+    def get_chat_run(run_id: str) -> dict[str, Any]:
+        output_dir = RUNS_DIR / run_id
+        resolved_output = output_dir.resolve()
+        resolved_root = RUNS_DIR.resolve()
+        if not output_dir.is_dir() or (resolved_output != resolved_root and resolved_root not in resolved_output.parents):
+            raise HTTPException(status_code=404, detail="run not found")
+        state_path = output_dir / _RUN_STATE_FILENAME
+        if state_path.exists():
+            return json.loads(state_path.read_text(encoding="utf-8"))
+        report = _find_run_dir(run_id)
+        if report is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return _report_summary(report)
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> dict[str, Any]:
@@ -257,6 +320,77 @@ def create_app() -> FastAPI:
             "douyin": _login_state_summary("douyin", DOUYIN_COOKIE_PATH),
         }
 
+    @app.post("/api/auth/{platform}/login")
+    def start_auth_login(platform: Literal["xiaohongshu", "douyin"]) -> dict[str, Any]:
+        """Open a local interactive browser login controlled by the Web page."""
+        process = _AUTH_PROCESSES.get(platform)
+        if process is not None and process.poll() is None:
+            existing = next((item for item in _AUTH_SESSIONS.values() if item.get("platform") == platform and item.get("status") in {"running", "completing"}), None)
+            return {"platform": platform, "session_id": existing.get("session_id", "") if existing else "", "status": "running"}
+
+        session_id = uuid4().hex
+        completion_file = AUTH_SESSION_DIR / f"{session_id}.complete"
+        if platform == "xiaohongshu":
+            command = [
+                sys.executable,
+                "-m",
+                "app.collectors.xiaohongshu_minimal",
+                "--login",
+                "--profile-dir",
+                ".profiles/xiaohongshu/browser",
+                "--cookie-path",
+                str(XHS_COOKIE_PATH),
+                "--completion-file",
+                str(completion_file),
+            ]
+        else:
+            command = [
+                sys.executable,
+                "-m",
+                "app.collectors.douyin_minimal",
+                "--login",
+                "--cookie-path",
+                str(DOUYIN_COOKIE_PATH),
+                "--completion-file",
+                str(completion_file),
+            ]
+
+        kwargs: dict[str, Any] = {"cwd": str(Path.cwd())}
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+        else:
+            kwargs["start_new_session"] = True
+        try:
+            _AUTH_PROCESSES[platform] = subprocess.Popen(command, **kwargs)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"unable to open login browser: {exc}") from exc
+        _AUTH_SESSIONS[session_id] = {"session_id": session_id, "platform": platform, "completion_file": str(completion_file), "status": "running", "started_at": _now(), "started_monotonic": monotonic()}
+        return {"platform": platform, "session_id": session_id, "status": "started"}
+
+    @app.get("/api/auth/sessions/{session_id}")
+    def get_auth_session(session_id: str) -> dict[str, Any]:
+        state = _auth_session_state(session_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="login session not found")
+        return state
+
+    @app.post("/api/auth/sessions/{session_id}/complete")
+    def complete_auth_login(session_id: str) -> dict[str, Any]:
+        session = _AUTH_SESSIONS.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="login session not found")
+        if monotonic() - float(session.get("started_monotonic", monotonic())) > _AUTH_SESSION_TTL_SECONDS:
+            process = _AUTH_PROCESSES.get(session["platform"])
+            if process is not None and process.poll() is None:
+                process.terminate()
+            session["status"] = "expired"
+            raise HTTPException(status_code=410, detail="login session expired")
+        completion_file = Path(session["completion_file"])
+        completion_file.parent.mkdir(parents=True, exist_ok=True)
+        completion_file.touch()
+        session["status"] = "completing"
+        return {"session_id": session_id, "platform": session["platform"], "status": "completing"}
+
     @app.put("/api/auth/{platform}")
     def save_auth_state(platform: Literal["xiaohongshu", "douyin"], request: LoginStateRequest) -> dict[str, Any]:
         path = XHS_COOKIE_PATH if platform == "xiaohongshu" else DOUYIN_COOKIE_PATH
@@ -325,7 +459,7 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
-def _run_response(state: dict[str, Any], status: str) -> dict[str, Any]:
+def _run_response(state: dict[str, Any], status: str, *, output_dir: Path | None = None) -> dict[str, Any]:
     return {
         "run_id": state.get("run_id", ""),
         "query": state.get("user_query", ""),
@@ -337,7 +471,48 @@ def _run_response(state: dict[str, Any], status: str) -> dict[str, Any]:
         "warnings": state.get("warnings", []),
         "errors": state.get("errors", []),
         "created_at": _now(),
+        "stages": state.get("stages", []),
     }
+
+
+def _execute_chat_run(query: str, output_dir: Path, run_id: str) -> None:
+    def progress(event: dict[str, Any]) -> None:
+        current = _read_run_state(output_dir)
+        stages = list(current.get("stages", []))
+        name = event.get("name", "")
+        if name and event.get("phase") == "start":
+            stages = [stage for stage in stages if stage.get("name") != name]
+            stages.append({"name": name, "status": "running", "started_at": event.get("started_at")})
+        elif name and event.get("phase") in {"finish", "failed"}:
+            stages = [stage for stage in stages if stage.get("name") != name]
+            stages.append({"name": name, "status": "failed" if event.get("phase") == "failed" else event.get("status", "success"), "started_at": event.get("started_at"), "ended_at": event.get("ended_at"), "duration_ms": event.get("duration_ms")})
+        _write_run_state(output_dir, {**current, "status": "running", "stages": stages, "updated_at": _now()})
+
+    _write_run_state(output_dir, {**_read_run_state(output_dir), "status": "running", "updated_at": _now()})
+    try:
+        state = run_workflow(query, output_dir, progress_callback=progress)
+        _write_run_state(output_dir, {**_run_response(state, "success"), "stages": _read_run_state(output_dir).get("stages", []), "updated_at": _now()})
+        _invalidate_report_cache()
+    except Exception as exc:
+        current = _read_run_state(output_dir)
+        _write_run_state(output_dir, {**current, "status": "failed", "error": _public_error("workflow failed", exc), "updated_at": _now()})
+
+
+def _read_run_state(output_dir: Path) -> dict[str, Any]:
+    path = output_dir / _RUN_STATE_FILENAME
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _write_run_state(output_dir: Path, state: dict[str, Any]) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    temporary = output_dir / f".{_RUN_STATE_FILENAME}.tmp"
+    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(output_dir / _RUN_STATE_FILENAME)
 
 
 def _report_summary(path: Path) -> dict[str, Any]:
@@ -462,6 +637,23 @@ def _login_state_summary(platform: str, path: Path) -> dict[str, Any]:
         "cookie_count": count,
         "updated_at": _mtime(path),
     }
+
+
+def _auth_session_state(session_id: str) -> dict[str, Any] | None:
+    session = _AUTH_SESSIONS.get(session_id)
+    if session is None:
+        return None
+    platform = session["platform"]
+    process = _AUTH_PROCESSES.get(platform)
+    if session.get("status") in {"running", "completing"}:
+        if monotonic() - float(session.get("started_monotonic", monotonic())) > _AUTH_SESSION_TTL_SECONDS:
+            if process is not None and process.poll() is None:
+                process.terminate()
+            session["status"] = "expired"
+        elif process is not None and process.poll() is not None:
+            cookie_path = XHS_COOKIE_PATH if platform == "xiaohongshu" else DOUYIN_COOKIE_PATH
+            session["status"] = "succeeded" if _login_state_summary(platform, cookie_path)["status"] == "saved" else "failed"
+    return {key: value for key, value in session.items() if key != "completion_file" and key != "started_monotonic"}
 
 
 def _managed_input_file(path: str | Path, roots: list[Path]) -> Path:

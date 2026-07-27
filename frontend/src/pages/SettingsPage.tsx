@@ -25,6 +25,8 @@ export function SettingsPage({ apiBase, theme, onApiBaseChange, onThemeChange }:
   const [states, setStates] = useState<Partial<Record<Platform, LoginState>>>({});
   const [cookieText, setCookieText] = useState<Record<Platform, string>>({ xiaohongshu: "", douyin: "" });
   const [saving, setSaving] = useState<Platform | null>(null);
+  const [loggingIn, setLoggingIn] = useState<Platform | null>(null);
+  const [loginSessions, setLoginSessions] = useState<Partial<Record<Platform, string>>>({});
   const [message, setMessage] = useState<Record<Platform, string>>({ xiaohongshu: "", douyin: "" });
 
   useEffect(() => {
@@ -47,6 +49,55 @@ export function SettingsPage({ apiBase, theme, onApiBaseChange, onThemeChange }:
       setMessage((current) => ({ ...current, [platform]: error instanceof Error ? error.message : "保存失败" }));
     } finally {
       setSaving(null);
+    }
+  }
+
+  async function startLogin(platform: Platform) {
+    try {
+      const before = states[platform]?.updated_at;
+      setLoggingIn(platform);
+      setMessage((current) => ({ ...current, [platform]: "登录窗口已打开。请在浏览器完成登录，完成后点击下方“我已完成登录”。" }));
+      const session = await api.startAuthLogin(platform);
+      setLoginSessions((current) => ({ ...current, [platform]: session.session_id }));
+      const timer = window.setInterval(async () => {
+        try {
+          const sessionState = await api.getAuthSession(session.session_id);
+          const nextStates = await api.authStatus();
+          setStates(nextStates);
+          if (sessionState.status === "failed" || sessionState.status === "expired") {
+            window.clearInterval(timer);
+            setLoggingIn(null);
+            setMessage((current) => ({ ...current, [platform]: "登录窗口已结束，请重新登录。" }));
+            return;
+          }
+          if (nextStates[platform]?.status === "saved" && nextStates[platform]?.updated_at !== before) {
+            window.clearInterval(timer);
+            setLoggingIn(null);
+            setMessage((current) => ({ ...current, [platform]: "登录状态已保存。" }));
+          }
+        } catch {
+          // Keep polling while the separate browser login process is open.
+        }
+      }, 2000);
+      window.setTimeout(() => {
+        window.clearInterval(timer);
+        setLoggingIn((current) => current === platform ? null : current);
+      }, 300000);
+    } catch (error) {
+      setLoggingIn(null);
+      setMessage((current) => ({ ...current, [platform]: error instanceof Error ? error.message : "无法打开登录窗口" }));
+    }
+  }
+
+  async function completeLogin(platform: Platform) {
+    const sessionId = loginSessions[platform];
+    if (!sessionId) return;
+    try {
+      setMessage((current) => ({ ...current, [platform]: "正在保存浏览器登录状态…" }));
+      await api.completeAuthLogin(sessionId);
+      setMessage((current) => ({ ...current, [platform]: "已通知浏览器保存，等待状态确认…" }));
+    } catch (error) {
+      setMessage((current) => ({ ...current, [platform]: error instanceof Error ? error.message : "无法完成登录" }));
     }
   }
 
@@ -128,6 +179,10 @@ export function SettingsPage({ apiBase, theme, onApiBaseChange, onThemeChange }:
                   />
                 </label>
                 <div className="auth-actions">
+                  <button className="primary" type="button" onClick={() => void startLogin(platform.id)} disabled={loggingIn !== null || saving !== null}>
+                    {loggingIn === platform.id ? "登录窗口已打开" : isSaved ? "重新登录" : "登录账号"}
+                  </button>
+                  {loginSessions[platform.id] && <button type="button" onClick={() => void completeLogin(platform.id)} disabled={loggingIn !== platform.id}>我已完成登录</button>}
                   <button className="primary" type="button" onClick={() => save(platform.id)} disabled={saving !== null || !cookieText[platform.id].trim()}>
                     {saving === platform.id ? "正在保存" : "保存登录状态"}
                   </button>

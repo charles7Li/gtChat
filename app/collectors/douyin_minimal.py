@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib import parse, request
@@ -46,6 +47,7 @@ def login_douyin(
     browser_executable_path: str | Path | None = None,
     playwright_factory=None,
     input_func=input,
+    completion_file: str | Path | None = None,
 ) -> dict:
     factory = playwright_factory or _sync_playwright
     cookie_file = Path(cookie_path)
@@ -63,7 +65,12 @@ def login_douyin(
             context = playwright.chromium.launch_persistent_context(str(profile), headless=False)
         page = context.pages[0] if getattr(context, "pages", []) else context.new_page()
         page.goto(login_url)
-        input_func("Scan Douyin QR code in the opened browser, then press Enter...")
+        if completion_file is None:
+            input_func("Scan Douyin QR code in the opened browser, then press Enter...")
+        else:
+            completion = Path(completion_file)
+            while not completion.exists():
+                time.sleep(0.5)
         cookies = context.cookies()
         cookie_file.write_text(json.dumps(cookies, ensure_ascii=False, indent=2), encoding="utf-8")
         context.close()
@@ -270,6 +277,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check-login", action="store_true")
     parser.add_argument("--login", action="store_true")
     parser.add_argument("--browser-executable-path", default="")
+    parser.add_argument("--completion-file", default="")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--hot-board", action="store_true")
     args = parser.parse_args(argv)
@@ -280,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.login:
         print(
             json.dumps(
-                login_douyin(cookie_path=args.cookie_path, browser_executable_path=args.browser_executable_path or None),
+                login_douyin(cookie_path=args.cookie_path, browser_executable_path=args.browser_executable_path or None, completion_file=args.completion_file or None),
                 ensure_ascii=False,
             )
         )

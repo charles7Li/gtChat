@@ -84,6 +84,53 @@ def test_login_douyin_saves_browser_cookies_without_network(tmp_path):
     assert seen["closed"] is True
 
 
+def test_login_douyin_completion_file_skips_console_input(tmp_path):
+    cookie_path = tmp_path / "default.cookies.json"
+    completion_file = tmp_path / "complete.marker"
+    completion_file.touch()
+    seen = {}
+
+    class FakePage:
+        def goto(self, url):
+            seen["url"] = url
+
+    class FakeContext:
+        pages = [FakePage()]
+
+        def cookies(self):
+            return [{"name": "sessionid", "value": "abc"}]
+
+        def close(self):
+            seen["closed"] = True
+
+    class FakeChromium:
+        def launch_persistent_context(self, user_data_dir, headless):
+            return FakeContext()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fail_input(_prompt):
+        raise AssertionError("completion-file flow must not read console input")
+
+    result = login_douyin(
+        cookie_path=cookie_path,
+        profile_dir=tmp_path / "browser",
+        playwright_factory=lambda: FakePlaywright(),
+        input_func=fail_input,
+        completion_file=completion_file,
+    )
+
+    assert result["cookie_count"] == 1
+    assert seen["closed"] is True
+
+
 def test_normalize_douyin_item_handles_search_and_detail_shape():
     item = normalize_douyin_item(
         {

@@ -28,6 +28,9 @@ export const api = {
       body: JSON.stringify({ query, allow_live: allowLive }),
     });
   },
+  getChatRun(runId: string) {
+    return request<ChatRun>(`/api/chat/runs/${encodeURIComponent(runId)}`);
+  },
   upload(file: File) {
     return request<UploadAsset>(`/api/uploads?filename=${encodeURIComponent(file.name)}`, {
       method: "POST",
@@ -76,6 +79,15 @@ export const api = {
   },
   authStatus() {
     return request<Record<Platform, LoginState>>("/api/auth/status");
+  },
+  startAuthLogin(platform: Platform) {
+    return request<{ platform: Platform; session_id: string; status: "started" | "running" }>(`/api/auth/${platform}/login`, { method: "POST" });
+  },
+  completeAuthLogin(sessionId: string) {
+    return request<{ session_id: string; platform: Platform; status: string }>(`/api/auth/sessions/${encodeURIComponent(sessionId)}/complete`, { method: "POST" });
+  },
+  getAuthSession(sessionId: string) {
+    return request<{ session_id: string; platform: Platform; status: string }>(`/api/auth/sessions/${encodeURIComponent(sessionId)}`);
   },
   saveAuthState(platform: Platform, cookies: Record<string, unknown>[]) {
     return request<LoginState>(`/api/auth/${platform}`, {

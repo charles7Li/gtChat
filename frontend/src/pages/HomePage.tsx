@@ -52,6 +52,24 @@ export function HomePage({ onOpenReports, onOpenSettings }: { onOpenReports: () 
   const activeStatus = mode === "monitor" ? monitorStatus : chatStatus;
 
   useEffect(() => {
+    if (!run?.run_id || !["queued", "running"].includes(run.status)) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await api.getChatRun(run.run_id);
+        setRun(next);
+        if (next.status === "success" || next.status === "failed") {
+          setChatStatus(next.status === "success" ? "success" : "failed");
+          if (next.error) setChatError(next.error);
+          window.clearInterval(timer);
+        }
+      } catch (error) {
+        setChatError(error instanceof Error ? error.message : "无法读取任务进度");
+      }
+    }, 800);
+    return () => window.clearInterval(timer);
+  }, [run?.run_id, run?.status]);
+
+  useEffect(() => {
     void api.authStatus().then(setAuthStates).catch(() => setAuthIssue("all"));
     void api.listJobs().then(setJobs).catch(() => setJobs([]));
   }, []);
@@ -235,7 +253,7 @@ export function HomePage({ onOpenReports, onOpenSettings }: { onOpenReports: () 
               </div>
               <StatusBadge status={activeStatus} />
             </div>
-            {mode === "chat" && <RunTimeline status={chatStatus} />}
+            {mode === "chat" && <RunTimeline status={chatStatus} stages={run?.stages} />}
             {chatError && <ErrorNotice message={chatError} />}
             {monitorError && <ErrorNotice message={monitorError} />}
             {authIssue && (

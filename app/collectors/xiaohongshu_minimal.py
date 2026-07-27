@@ -116,7 +116,13 @@ async def collect_xiaohongshu(
             await context.close()
             if browser:
                 await browser.close()
-async def login_xiaohongshu(profile_dir: str | Path, *, start_url: str = "https://www.xiaohongshu.com/explore") -> None:
+async def login_xiaohongshu(
+    profile_dir: str | Path,
+    *,
+    start_url: str = "https://www.xiaohongshu.com/explore",
+    cookie_path: str | Path | None = None,
+    completion_file: str | Path | None = None,
+) -> None:
     """Open a persistent browser profile and wait for the user to log in."""
 
     try:
@@ -132,9 +138,17 @@ async def login_xiaohongshu(profile_dir: str | Path, *, start_url: str = "https:
         page = await context.new_page()
         try:
             await page.goto(start_url, wait_until="domcontentloaded")
-            print("Browser opened. Log in to Xiaohongshu in that window, then return here and press Enter to save the profile.")
-            await asyncio.to_thread(input)
+            if completion_file is None:
+                print("Browser opened. Log in to Xiaohongshu in that window, then return here and press Enter to save the profile.")
+                await asyncio.to_thread(input)
+            else:
+                completion = Path(completion_file)
+                while not completion.exists():
+                    await asyncio.sleep(0.5)
         finally:
+            if cookie_path is not None:
+                Path(cookie_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(cookie_path).write_text(json.dumps(await context.cookies(), ensure_ascii=False, indent=2), encoding="utf-8")
             await context.close()
 
 async def raise_if_blocked(page, keyword: str, output_dir: str | Path = DEFAULT_SEARCH_DIR) -> None:
@@ -467,9 +481,11 @@ def main() -> None:
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--login", action="store_true", help="Open a persistent browser profile and wait for manual login")
     parser.add_argument("--profile-dir", default=os.getenv("XHS_USER_DATA_DIR") or ".xhs-profile")
+    parser.add_argument("--cookie-path", default=str(DEFAULT_COOKIE_PATH))
+    parser.add_argument("--completion-file", default="")
     args = parser.parse_args()
     if args.login:
-        asyncio.run(login_xiaohongshu(args.profile_dir))
+        asyncio.run(login_xiaohongshu(args.profile_dir, cookie_path=args.cookie_path, completion_file=args.completion_file or None))
         print(json.dumps({"profile_dir": str(Path(args.profile_dir).resolve()), "status": "saved"}, ensure_ascii=False))
         return
     if args.profile_dir and not os.getenv("XHS_USER_DATA_DIR"):

@@ -2,6 +2,7 @@
 
 const labels: Record<RunStatus, string> = {
   pending: "待处理",
+  queued: "排队中",
   running: "运行中",
   success: "完成",
   failed: "失败",

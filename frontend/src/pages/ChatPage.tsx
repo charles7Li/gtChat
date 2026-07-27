@@ -1,4 +1,4 @@
-﻿import { FormEvent, useState } from "react";
+﻿import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
 import { BriefBuilder } from "../components/BriefBuilder";
 import { ErrorNotice } from "../components/ErrorNotice";
@@ -16,6 +16,24 @@ export function ChatPage({ onOpenReports }: { onOpenReports: () => void }) {
   const [run, setRun] = useState<ChatRun | null>(null);
   const [error, setError] = useState("");
 
+  useEffect(() => {
+    if (!run?.run_id || !["queued", "running"].includes(run.status)) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await api.getChatRun(run.run_id);
+        setRun(next);
+        if (next.status === "success" || next.status === "failed") {
+          setStatus(next.status === "success" ? "success" : "failed");
+          if (next.error) setError(next.error);
+          window.clearInterval(timer);
+        }
+      } catch (exc) {
+        setError(exc instanceof Error ? exc.message : "无法读取任务状态");
+      }
+    }, 800);
+    return () => window.clearInterval(timer);
+  }, [run?.run_id, run?.status]);
+
   const composedBrief = `任务：${taskType}。输出：${outputTarget}。来源：${sourceContext}。简报：${query}`;
 
   async function runWorkflow() {
@@ -24,7 +42,7 @@ export function ChatPage({ onOpenReports }: { onOpenReports: () => void }) {
     try {
       const result = await api.runChat(composedBrief, allowLive);
       setRun(result);
-      setStatus("success");
+      setStatus(result.status === "success" ? "success" : "running");
     } catch (exc) {
       setStatus("failed");
       setError(exc instanceof Error ? exc.message : "运行失败");
@@ -81,7 +99,7 @@ export function ChatPage({ onOpenReports }: { onOpenReports: () => void }) {
             </div>
             <StatusBadge status={status} />
           </div>
-          <RunTimeline status={status} />
+          <RunTimeline status={status} stages={run?.stages} />
           {error && <ErrorNotice message={error} onRetry={() => void runWorkflow()} />}
           {run ? (
             <div className="result-list">
