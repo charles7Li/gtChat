@@ -59,6 +59,9 @@ def create_initial_state(
         state["requested_route"] = route_override
     allowed_inputs = {"reference_video_path", "commercial_data_path"}
     for key, value in (input_overrides or {}).items():
+        if key == "run_id" and value:
+            state["run_id"] = str(value)
+            continue
         if key in allowed_inputs and value:
             state[key] = str(value)  # type: ignore[literal-required]
     return state

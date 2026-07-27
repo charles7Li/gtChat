@@ -5,6 +5,7 @@ import hmac
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -47,6 +48,11 @@ AUTH_SESSION_DIR = Path(".profiles/auth_sessions")
 _AUTH_SESSION_TTL_SECONDS = 10 * 60
 _RUN_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mochi-web-run")
 _RUN_STATE_FILENAME = "run_state.json"
+_ASSET_METADATA_FILENAME = "asset.json"
+
+
+class RunCancelled(Exception):
+    """Raised by the progress hook after a user requests cancellation."""
 
 
 class ChatRunRequest(BaseModel):
@@ -62,6 +68,15 @@ class UploadAsset(BaseModel):
     file_type: str
     path: str
     created_at: str
+    size: int = 0
+    status: str = "uploaded"
+    result: dict[str, Any] | None = None
+    error: str | None = None
+
+
+class UploadProcessRequest(BaseModel):
+    max_keyframes: int = Field(default=20, ge=1, le=100)
+    transcribe: bool = False
 
 
 class VideoAnalyzeRequest(BaseModel):
@@ -174,11 +189,16 @@ def create_app() -> FastAPI:
             "query": request.query,
             "route": planned_route or "",
             "status": "queued",
+            "allow_live": request.allow_live,
             "stages": [],
             "created_at": _now(),
         })
         _RUN_EXECUTOR.submit(_execute_chat_run, request.query, output_dir, run_id)
         return _run_response({"run_id": run_id, "user_query": request.query, "route": planned_route or ""}, "queued", output_dir=output_dir)
+
+    @app.get("/api/chat/runs")
+    def list_chat_runs(limit: int = Query(20, ge=1, le=100)) -> list[dict[str, Any]]:
+        return _chat_run_states()[:limit]
 
     @app.get("/api/chat/runs/{run_id}")
     def get_chat_run(run_id: str) -> dict[str, Any]:
@@ -194,6 +214,25 @@ def create_app() -> FastAPI:
         if report is None:
             raise HTTPException(status_code=404, detail="run not found")
         return _report_summary(report)
+
+    @app.post("/api/chat/runs/{run_id}/cancel")
+    def cancel_chat_run(run_id: str) -> dict[str, Any]:
+        output_dir = _chat_run_dir(run_id)
+        state = _read_run_state(output_dir)
+        if state.get("status") not in {"queued", "running", "cancelling"}:
+            raise HTTPException(status_code=409, detail="run is not cancellable")
+        state.update({"status": "cancelling", "cancel_requested": True, "updated_at": _now()})
+        _write_run_state(output_dir, state)
+        return state
+
+    @app.post("/api/chat/runs/{run_id}/retry")
+    def retry_chat_run(run_id: str) -> dict[str, Any]:
+        output_dir = _chat_run_dir(run_id)
+        state = _read_run_state(output_dir)
+        query = str(state.get("query") or "").strip()
+        if not query:
+            raise HTTPException(status_code=409, detail="run query is unavailable")
+        return create_chat_run(ChatRunRequest(query=query, allow_live=bool(state.get("allow_live", False))))
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> dict[str, Any]:
@@ -228,14 +267,76 @@ def create_app() -> FastAPI:
             if temporary.exists():
                 temporary.unlink()
         content_type = request.headers.get("content-type") or "application/octet-stream"
-        return UploadAsset(
+        asset = UploadAsset(
             asset_id=asset_id,
             filename=filename,
             content_type=content_type,
             file_type=_file_type(filename, content_type),
             path=str(target),
             created_at=_now(),
+            size=size,
         )
+        _write_asset_metadata(asset.model_dump())
+        return asset
+
+    @app.get("/api/uploads")
+    def list_uploads(limit: int = Query(100, ge=1, le=500)) -> list[dict[str, Any]]:
+        if not UPLOADS_DIR.exists():
+            return []
+        assets = [
+            metadata
+            for path in UPLOADS_DIR.glob(f"*/{_ASSET_METADATA_FILENAME}")
+            if (metadata := _read_json(path)) is not None
+        ]
+        return sorted(assets, key=lambda item: str(item.get("created_at", "")), reverse=True)[:limit]
+
+    @app.post("/api/uploads/{asset_id}/process")
+    def process_upload(asset_id: str, request: UploadProcessRequest) -> dict[str, Any]:
+        asset = _get_asset(asset_id)
+        source_path = _managed_input_file(str(asset["path"]), [UPLOADS_DIR])
+        asset.update({"status": "processing", "error": None})
+        _write_asset_metadata(asset)
+        try:
+            if asset["file_type"] == "video":
+                output_dir = _managed_output_path(None, REPORT_ROOT / "video_analysis", asset_id)
+                result = analyze_local_video(
+                    str(source_path),
+                    output_dir=str(output_dir),
+                    max_keyframes=request.max_keyframes,
+                    transcribe=request.transcribe,
+                )
+            elif asset["file_type"] in {"csv", "json"}:
+                record = import_chanmama_file(source_path)
+                result = {
+                    "source": "chanmama",
+                    "record_count": record.get("record_count", 0),
+                    "records": [record],
+                    "provenance": [record.get("provenance", {})],
+                }
+            else:
+                raise HTTPException(status_code=400, detail="this asset type has no processing workflow")
+        except HTTPException:
+            asset.update({"status": "failed", "error": "unsupported processing request"})
+            _write_asset_metadata(asset)
+            raise
+        except Exception as exc:
+            asset.update({"status": "failed", "error": _public_error("asset processing failed", exc)})
+            _write_asset_metadata(asset)
+            raise HTTPException(status_code=500, detail=asset["error"]) from exc
+        asset.update({"status": "completed", "result": result, "error": None})
+        _write_asset_metadata(asset)
+        return asset
+
+    @app.delete("/api/uploads/{asset_id}", status_code=204)
+    def delete_upload(asset_id: str):
+        asset = _get_asset(asset_id)
+        target = Path(str(asset["path"])).parent
+        resolved_root = UPLOADS_DIR.resolve()
+        resolved_target = target.resolve()
+        if resolved_root not in resolved_target.parents:
+            raise HTTPException(status_code=400, detail="asset is outside managed storage")
+        shutil.rmtree(resolved_target)
+        return None
 
     @app.post("/api/video/analyze")
     def analyze_video(request: VideoAnalyzeRequest) -> dict[str, Any]:
@@ -306,8 +407,22 @@ def create_app() -> FastAPI:
             signals_path=signals_path,
             output_dir=data.get("output_dir") or "outputs/hotspot",
         )
+        data["last_run_at"] = _now()
+        data["last_result"] = result
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         _invalidate_report_cache()
         return result
+
+    @app.delete("/api/monitor/jobs/{job_id}", status_code=204)
+    def delete_monitor_job(job_id: str):
+        path = _job_path(job_id)
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="job not found")
+        path.unlink()
+        signals_path = MONITOR_DIR / f"{job_id}.signals.json"
+        if signals_path.exists():
+            signals_path.unlink()
+        return None
 
     @app.get("/api/monitor/digest")
     def monitor_digest(state_dir: str = "state", limit: int = Query(20, ge=1, le=200)) -> dict[str, Any]:
@@ -478,6 +593,8 @@ def _run_response(state: dict[str, Any], status: str, *, output_dir: Path | None
 def _execute_chat_run(query: str, output_dir: Path, run_id: str) -> None:
     def progress(event: dict[str, Any]) -> None:
         current = _read_run_state(output_dir)
+        if current.get("cancel_requested"):
+            raise RunCancelled("run cancelled by user")
         stages = list(current.get("stages", []))
         name = event.get("name", "")
         if name and event.get("phase") == "start":
@@ -488,11 +605,35 @@ def _execute_chat_run(query: str, output_dir: Path, run_id: str) -> None:
             stages.append({"name": name, "status": "failed" if event.get("phase") == "failed" else event.get("status", "success"), "started_at": event.get("started_at"), "ended_at": event.get("ended_at"), "duration_ms": event.get("duration_ms")})
         _write_run_state(output_dir, {**current, "status": "running", "stages": stages, "updated_at": _now()})
 
-    _write_run_state(output_dir, {**_read_run_state(output_dir), "status": "running", "updated_at": _now()})
+    initial = _read_run_state(output_dir)
+    if initial.get("cancel_requested"):
+        _write_run_state(output_dir, {**initial, "status": "cancelled", "updated_at": _now()})
+        return
+    _write_run_state(output_dir, {**initial, "status": "running", "updated_at": _now()})
     try:
-        state = run_workflow(query, output_dir, progress_callback=progress)
-        _write_run_state(output_dir, {**_run_response(state, "success"), "stages": _read_run_state(output_dir).get("stages", []), "updated_at": _now()})
+        state = run_workflow(
+            query,
+            output_dir,
+            progress_callback=progress,
+            input_overrides={"run_id": run_id},
+        )
+        current = _read_run_state(output_dir)
+        if current.get("cancel_requested"):
+            raise RunCancelled("run cancelled by user")
+        completed = _run_response(state, "success")
+        completed.update({
+            "run_id": run_id,
+            "query": current.get("query", query),
+            "allow_live": current.get("allow_live", False),
+            "created_at": current.get("created_at", completed["created_at"]),
+            "stages": current.get("stages", []),
+            "updated_at": _now(),
+        })
+        _write_run_state(output_dir, completed)
         _invalidate_report_cache()
+    except RunCancelled:
+        current = _read_run_state(output_dir)
+        _write_run_state(output_dir, {**current, "status": "cancelled", "cancel_requested": True, "updated_at": _now()})
     except Exception as exc:
         current = _read_run_state(output_dir)
         _write_run_state(output_dir, {**current, "status": "failed", "error": _public_error("workflow failed", exc), "updated_at": _now()})
@@ -515,22 +656,68 @@ def _write_run_state(output_dir: Path, state: dict[str, Any]) -> None:
     temporary.replace(output_dir / _RUN_STATE_FILENAME)
 
 
+def _chat_run_dir(run_id: str) -> Path:
+    if re.fullmatch(r"^[A-Za-z0-9_-]{1,80}$", run_id) is None:
+        raise HTTPException(status_code=400, detail="invalid run id")
+    output_dir = RUNS_DIR / run_id
+    resolved_root = RUNS_DIR.resolve()
+    resolved_output = output_dir.resolve()
+    if not output_dir.is_dir() or resolved_root not in resolved_output.parents:
+        raise HTTPException(status_code=404, detail="run not found")
+    return output_dir
+
+
+def _chat_run_states() -> list[dict[str, Any]]:
+    if not RUNS_DIR.exists():
+        return []
+    states = [
+        state
+        for path in RUNS_DIR.glob(f"*/{_RUN_STATE_FILENAME}")
+        if (state := _read_json(path)) is not None
+    ]
+    return sorted(
+        states,
+        key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+        reverse=True,
+    )
+
+
 def _report_summary(path: Path) -> dict[str, Any]:
     manifest_path = path / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
     trace_path = path / "agent_trace.json"
     trace = json.loads(trace_path.read_text(encoding="utf-8")) if trace_path.exists() else {}
+    report_path = path / "trend_report.md"
+    markdown = report_path.read_text(encoding="utf-8") if report_path.exists() else ""
+    raw_title = next(
+        (line.removeprefix("#").strip() for line in markdown.splitlines() if line.startswith("# ")),
+        "",
+    )
+    state = _read_json(path / _RUN_STATE_FILENAME) or {}
+    title, inferred_query = _report_title(raw_title)
     return {
         "run_id": str(manifest.get("run_id") or trace.get("run_id") or path.name),
+        "title": title or str(manifest.get("title") or "未命名报告"),
+        "query": state.get("query") or manifest.get("query") or trace.get("user_query") or inferred_query,
         "route": manifest.get("route") or trace.get("route") or "",
-        "status": "success" if (path / "trend_report.md").exists() else "unknown",
+        "status": "success" if report_path.exists() else state.get("status", "unknown"),
         "created_at": manifest.get("created_at") or trace.get("created_at") or _mtime(path),
-        "report_path": str(path / "trend_report.md") if (path / "trend_report.md").exists() else manifest.get("report"),
+        "report_path": str(report_path) if report_path.exists() else manifest.get("report"),
         "trace_path": str(trace_path) if trace_path.exists() else manifest.get("agent_trace"),
         "manifest_path": str(manifest_path) if manifest_path.exists() else "",
         "evidence_path": str(path / "evidence_pack.json") if (path / "evidence_pack.json").exists() else manifest.get("evidence_pack"),
         "warnings": trace.get("warnings", []),
+        "errors": trace.get("errors", []),
     }
+
+
+def _report_title(raw_title: str) -> tuple[str, str]:
+    segments = [segment.strip() for segment in raw_title.split("｜") if segment.strip()]
+    if segments and re.fullmatch(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}", segments[0]):
+        segments = segments[1:]
+    if len(segments) >= 2:
+        return segments[-1], segments[-2]
+    return (segments[0] if segments else raw_title), ""
 
 
 def _report_dirs() -> list[Path]:
@@ -579,6 +766,36 @@ def _empty_signals_file(job_id: str) -> str:
     if not path.exists():
         path.write_text(json.dumps({"signals": []}, ensure_ascii=False), encoding="utf-8")
     return str(path)
+
+
+def _asset_metadata_path(asset_id: str) -> Path:
+    if re.fullmatch(r"^[a-f0-9]{32}$", asset_id) is None:
+        raise HTTPException(status_code=400, detail="invalid asset id")
+    return UPLOADS_DIR / asset_id / _ASSET_METADATA_FILENAME
+
+
+def _get_asset(asset_id: str) -> dict[str, Any]:
+    path = _asset_metadata_path(asset_id)
+    asset = _read_json(path)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="asset not found")
+    return asset
+
+
+def _write_asset_metadata(asset: dict[str, Any]) -> None:
+    path = _asset_metadata_path(str(asset["asset_id"]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(asset, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _file_type(filename: str, content_type: str) -> str:

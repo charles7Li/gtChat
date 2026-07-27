@@ -9,15 +9,15 @@ import app.web_api as web_api
 def test_chat_run_returns_workflow_artifacts(monkeypatch, tmp_path):
     monkeypatch.setattr(web_api, "RUNS_DIR", tmp_path / "runs")
 
-    def fake_run_workflow(query, output_dir, progress_callback=None):
-        output_dir.mkdir(parents=True)
+    def fake_run_workflow(query, output_dir, progress_callback=None, input_overrides=None):
+        output_dir.mkdir(parents=True, exist_ok=True)
         if progress_callback:
             progress_callback({"phase": "start", "name": "plan", "started_at": "now"})
         (output_dir / "trend_report.md").write_text("# Report", encoding="utf-8")
         if progress_callback:
             progress_callback({"phase": "finish", "name": "plan", "status": "success", "started_at": "now", "ended_at": "now", "duration_ms": 1})
         return {
-            "run_id": output_dir.name,
+            "run_id": input_overrides["run_id"],
             "user_query": query,
             "route": "trend_report_path",
             "report_path": str(output_dir / "trend_report.md"),
@@ -54,6 +54,34 @@ def test_chat_run_rejects_full_pipeline_without_live(monkeypatch):
     assert "allow_live" in response.json()["detail"]
 
 
+def test_chat_runs_can_be_listed_cancelled_and_retried(monkeypatch, tmp_path):
+    class DeferredExecutor:
+        def submit(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(web_api, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(web_api, "_RUN_EXECUTOR", DeferredExecutor())
+    monkeypatch.setattr(web_api.PlanAgent, "run", lambda self, query: {"route": "trend_report_path"})
+    client = TestClient(web_api.create_app())
+
+    created = client.post("/api/chat/runs", json={"query": "pet trend"}).json()
+    run_id = created["run_id"]
+
+    listed = client.get("/api/chat/runs").json()
+    assert listed[0]["run_id"] == run_id
+    cancelled = client.post(f"/api/chat/runs/{run_id}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelling"
+
+    web_api._write_run_state(
+        tmp_path / "runs" / run_id,
+        {**cancelled.json(), "status": "cancelled", "query": "pet trend"},
+    )
+    retried = client.post(f"/api/chat/runs/{run_id}/retry")
+    assert retried.status_code == 200
+    assert retried.json()["run_id"] != run_id
+
+
 def test_upload_asset_writes_file(monkeypatch, tmp_path):
     monkeypatch.setattr(web_api, "UPLOADS_DIR", tmp_path / "uploads")
     response = TestClient(web_api.create_app()).post(
@@ -66,6 +94,35 @@ def test_upload_asset_writes_file(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert payload["file_type"] == "json"
     assert (tmp_path / "uploads" / payload["asset_id"] / "items.json").exists()
+    assert (tmp_path / "uploads" / payload["asset_id"] / "asset.json").exists()
+
+
+def test_uploaded_assets_persist_process_and_delete(monkeypatch, tmp_path):
+    monkeypatch.setattr(web_api, "UPLOADS_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(
+        web_api,
+        "import_chanmama_file",
+        lambda path: {"record_count": 2, "provenance": {"source": str(path)}},
+    )
+    client = TestClient(web_api.create_app())
+    uploaded = client.post(
+        "/api/uploads?filename=items.json",
+        content=b"{\"items\": []}",
+        headers={"content-type": "application/json"},
+    ).json()
+
+    assets = client.get("/api/uploads").json()
+    assert assets[0]["asset_id"] == uploaded["asset_id"]
+    assert assets[0]["status"] == "uploaded"
+
+    processed = client.post(f"/api/uploads/{uploaded['asset_id']}/process", json={})
+    assert processed.status_code == 200
+    assert processed.json()["status"] == "completed"
+    assert processed.json()["result"]["record_count"] == 2
+
+    deleted = client.delete(f"/api/uploads/{uploaded['asset_id']}")
+    assert deleted.status_code == 204
+    assert client.get("/api/uploads").json() == []
 
 
 def test_video_analyze_calls_local_analyzer(monkeypatch, tmp_path):
@@ -135,6 +192,7 @@ def test_reports_list_run_lookup_and_preview(monkeypatch, tmp_path):
 
     client = TestClient(web_api.create_app())
     assert client.get("/api/reports").json()[0]["run_id"] == "run-1"
+    assert client.get("/api/reports").json()[0]["title"] == "Report"
     assert client.get("/api/runs/run-1").json()["run_id"] == "run-1"
     assert client.get("/api/reports/run-1").json()["markdown"] == "# Report"
     assert client.get("/api/reports/run-1/artifacts/trace").json()["nodes"] == []
@@ -171,6 +229,11 @@ def test_monitor_job_run_once_uses_empty_signals(monkeypatch, tmp_path):
     assert saved["rule"] == {"min_heat_score": 80.0, "min_growth_rate": 0.3, "min_rank": 20, "min_engagement": 500, "required_sources": []}
     assert client.post("/api/monitor/jobs/job-1/run-once").json() == {"status": "skipped"}
     assert calls["signals_path"].endswith("job-1.signals.json")
+    updated = client.get("/api/monitor/jobs").json()[0]
+    assert updated["last_result"] == {"status": "skipped"}
+    assert updated["last_run_at"]
+    assert client.delete("/api/monitor/jobs/job-1").status_code == 204
+    assert client.get("/api/monitor/jobs").json() == []
 
 
 def test_monitor_digest_summarizes_events(monkeypatch, tmp_path):

@@ -230,13 +230,14 @@ def test_workflow_route_and_inputs_can_be_overridden_internally():
     state = create_initial_state(
         "普通描述",
         route_override="imitation_plan_path",
-        input_overrides={"reference_video_path": "uploads/reference.mp4", "unsafe": "ignored"},
+        input_overrides={"run_id": "web-run-1", "reference_video_path": "uploads/reference.mp4", "unsafe": "ignored"},
     )
 
     planned = plan_node(state)
 
     assert planned["route"] == "imitation_plan_path"
     assert planned["plan"]["route"] == "imitation_plan_path"
+    assert planned["run_id"] == "web-run-1"
     assert planned["reference_video_path"] == "uploads/reference.mp4"
     assert "unsafe" not in planned
 
