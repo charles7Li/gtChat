@@ -81,7 +81,7 @@ npm run typecheck
 npm run build:weapp
 ```
 
-Import `miniprogram/dist` in WeChat DevTools. The production release still requires a real AppID, a filed HTTPS domain, WeChat privacy/review configuration, cloud storage/database/queue adapters, and completion of the release gates in `docs/upgrade/29-wechat-miniprogram-release-plan.md`.
+Import `miniprogram/dist` in WeChat DevTools. The production release still requires a real AppID, a filed HTTPS domain, WeChat privacy/review configuration, cloud storage/database/queue adapters, and completion of the release gates in `docs/upgrade/09-wechat-miniprogram-release-plan.md`.
 
 ### Web API security
 
@@ -129,6 +129,8 @@ Route definitions: [`pipeline_defs/`](pipeline_defs/)
 # Opens browser → scan QR → press Enter → profile saved
 python -m app.collectors.xiaohongshu_minimal --login
 
+For the desktop Web flow, start the API and use Settings → platform login → “我已完成登录”; the CLI Enter prompt remains only as a standalone fallback.
+
 # Search
 python -m app.collectors.xiaohongshu_minimal --keyword "猫粮" --limit 20
 ```
@@ -170,6 +172,14 @@ python -m app.live_checks
 
 # Live: test douyin endpoints + notification webhook
 python -m app.live_checks --allow-live --keyword "猫粮"
+```
+
+## Windows local doctor and EXE packaging
+
+```powershell
+python scripts/doctor.py
+python -m pip install pyinstaller
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Clean -Python C:\path\to\clean\python.exe
 ```
 
 ## Monitor
