@@ -4,6 +4,7 @@ import { HomePage } from "./pages/HomePage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { UploadPage } from "./pages/UploadPage";
+import type { Platform } from "./api";
 import type { ThemeId } from "./types";
 
 export type Page = "chat" | "uploads" | "reports" | "settings";
@@ -26,6 +27,7 @@ export default function App() {
   const [page, setPage] = useState<Page>("chat");
   const [apiBase, setApiBase] = useState("local");
   const [theme, setTheme] = useState<ThemeId>(readTheme);
+  const [settingsFocus, setSettingsFocus] = useState<Platform | undefined>();
   const meta = useMemo(() => pageMeta[page], [page]);
 
   useEffect(() => {
@@ -36,6 +38,11 @@ export default function App() {
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem("mochi-theme", theme);
   }, [theme]);
+
+  function openSettings(platform?: Platform) {
+    setSettingsFocus(platform);
+    setPage("settings");
+  }
 
   return (
     <div className="app-shell">
@@ -53,13 +60,14 @@ export default function App() {
           </div>
         </header>
         <div className="page-surface" key={page}>
-          {page === "chat" && <HomePage onOpenReports={() => setPage("reports")} onOpenSettings={() => setPage("settings")} />}
+          {page === "chat" && <HomePage onOpenReports={() => setPage("reports")} onOpenSettings={openSettings} />}
           {page === "uploads" && <UploadPage onOpenReports={() => setPage("reports")} />}
           {page === "reports" && <ReportsPage />}
           {page === "settings" && (
             <SettingsPage
               apiBase={apiBase}
               theme={theme}
+              focusedPlatform={settingsFocus}
               onApiBaseChange={setApiBase}
               onThemeChange={setTheme}
             />

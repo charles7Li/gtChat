@@ -8,6 +8,17 @@ export type LoginState = {
   updated_at: string | null;
 };
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   const adminToken = import.meta.env.VITE_MOCHI_ADMIN_TOKEN;
@@ -15,8 +26,13 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, headers });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.detail || `${response.status} ${response.statusText}`);
+    const detail = payload.detail;
+    const message = typeof detail === "string"
+      ? detail
+      : detail?.message || `${response.status} ${response.statusText}`;
+    throw new ApiError(message, response.status, detail?.code);
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -31,12 +47,34 @@ export const api = {
   getChatRun(runId: string) {
     return request<ChatRun>(`/api/chat/runs/${encodeURIComponent(runId)}`);
   },
+  listChatRuns() {
+    return request<ChatRun[]>("/api/chat/runs");
+  },
+  cancelChatRun(runId: string) {
+    return request<ChatRun>(`/api/chat/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
+  },
+  retryChatRun(runId: string) {
+    return request<ChatRun>(`/api/chat/runs/${encodeURIComponent(runId)}/retry`, { method: "POST" });
+  },
   upload(file: File) {
     return request<UploadAsset>(`/api/uploads?filename=${encodeURIComponent(file.name)}`, {
       method: "POST",
       headers: { "content-type": file.type || "application/octet-stream" },
       body: file,
     });
+  },
+  listUploads() {
+    return request<UploadAsset[]>("/api/uploads");
+  },
+  processUpload(assetId: string) {
+    return request<UploadAsset>(`/api/uploads/${encodeURIComponent(assetId)}/process`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+  },
+  deleteUpload(assetId: string) {
+    return request<void>(`/api/uploads/${encodeURIComponent(assetId)}`, { method: "DELETE" });
   },
   analyzeVideo(path: string) {
     return request<Record<string, unknown>>("/api/video/analyze", {
@@ -73,6 +111,9 @@ export const api = {
   },
   runJob(jobId: string) {
     return request<Record<string, unknown>>(`/api/monitor/jobs/${encodeURIComponent(jobId)}/run-once`, { method: "POST" });
+  },
+  deleteJob(jobId: string) {
+    return request<void>(`/api/monitor/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
   },
   digest() {
     return request<Record<string, unknown>>("/api/monitor/digest");

@@ -21,7 +21,8 @@ export function ReportsPage() {
     try {
       const items = await api.listReports();
       setReports(items);
-      if (!selected && items[0]) await preview(items[0].run_id);
+      const target = items.find((item) => item.run_id === selected?.run_id) || items[0];
+      if (target) await preview(target.run_id);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "报告加载失败");
     } finally {
@@ -71,8 +72,8 @@ export function ReportsPage() {
           {reports.map((report) => (
             <button key={report.run_id} className={selected?.run_id === report.run_id ? "report-row active" : "report-row"} onClick={() => void preview(report.run_id)}>
               <span>
-                <strong>{report.run_id}</strong>
-                <small>{report.route || "未知路径"}</small>
+                <strong>{report.title || report.query || "未命名报告"}</strong>
+                <small>{briefLabel(report.query) || routeLabel(report.route)}</small>
                 <small>{new Date(report.created_at).toLocaleString()} · {report.warnings?.length || 0} 条提醒</small>
               </span>
               <StatusBadge status={report.status} />
@@ -85,10 +86,17 @@ export function ReportsPage() {
         <div className="reader-toolbar">
           <div>
             <p className="section-kicker">阅读</p>
-            <h2>{selected?.run_id || "选择一份报告"}</h2>
+            <h2>{selected?.title || selected?.query || "选择一份报告"}</h2>
+            {selected && <p className="reader-meta">{routeLabel(selected.route)} · {new Date(selected.created_at).toLocaleString()}</p>}
           </div>
           {selected?.run_id && <a className="button-link" href={`/api/reports/${encodeURIComponent(selected.run_id)}/download`}>下载 MD</a>}
         </div>
+        {selected?.warnings?.length ? (
+          <details className="report-warnings">
+            <summary>{selected.warnings.length} 条运行提醒</summary>
+            <ul>{selected.warnings.map((warning, index) => <li key={index}>{warningText(warning)}</li>)}</ul>
+          </details>
+        ) : null}
         <ReportPreview markdown={selected?.markdown || ""} />
       </section>
 
@@ -102,4 +110,26 @@ export function ReportsPage() {
       />
     </section>
   );
+}
+
+function routeLabel(route: string): string {
+  return ({
+    trend_report_path: "趋势报告",
+    imitation_plan_path: "仿拍方案",
+    reference_video_imitation_path: "参考视频分析",
+    full_pipeline_path: "联网全流程",
+    commercial_data_analysis_path: "商业数据分析",
+  } as Record<string, string>)[route] || route || "未知路线";
+}
+
+function warningText(warning: Record<string, unknown>): string {
+  const message = warning.message || warning.detail || warning.code;
+  return typeof message === "string" ? message : JSON.stringify(warning);
+}
+
+function briefLabel(query?: string): string {
+  if (!query) return "";
+  const brief = query.split("简报：").pop()?.trim() || query;
+  if (/^[?\s]+$/.test(brief)) return "历史任务";
+  return brief.length > 48 ? `${brief.slice(0, 48)}…` : brief;
 }

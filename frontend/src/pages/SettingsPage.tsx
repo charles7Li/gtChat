@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type LoginState, type Platform } from "../api";
 import type { ThemeId } from "../types";
 
@@ -17,22 +17,35 @@ const themes: Array<{ id: ThemeId; name: string; mood: string; swatches: string[
 type SettingsPageProps = {
   apiBase: string;
   theme: ThemeId;
+  focusedPlatform?: Platform;
   onApiBaseChange: (value: string) => void;
   onThemeChange: (value: ThemeId) => void;
 };
 
-export function SettingsPage({ apiBase, theme, onApiBaseChange, onThemeChange }: SettingsPageProps) {
+export function SettingsPage({ apiBase, theme, focusedPlatform, onApiBaseChange, onThemeChange }: SettingsPageProps) {
   const [states, setStates] = useState<Partial<Record<Platform, LoginState>>>({});
   const [cookieText, setCookieText] = useState<Record<Platform, string>>({ xiaohongshu: "", douyin: "" });
   const [saving, setSaving] = useState<Platform | null>(null);
   const [loggingIn, setLoggingIn] = useState<Platform | null>(null);
   const [loginSessions, setLoginSessions] = useState<Partial<Record<Platform, string>>>({});
   const [message, setMessage] = useState<Record<Platform, string>>({ xiaohongshu: "", douyin: "" });
+  const platformRefs = useRef<Partial<Record<Platform, HTMLElement | null>>>({});
+  const timers = useRef<Partial<Record<Platform, number>>>({});
 
   useEffect(() => {
     api.authStatus()
       .then(setStates)
       .catch(() => setMessage((current) => ({ ...current, xiaohongshu: "无法读取登录状态，请确认本地 API 已启动。" })));
+  }, []);
+
+  useEffect(() => {
+    if (!focusedPlatform) return;
+    const target = platformRefs.current[focusedPlatform];
+    window.setTimeout(() => target?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+  }, [focusedPlatform]);
+
+  useEffect(() => () => {
+    Object.values(timers.current).forEach((timer) => timer && window.clearInterval(timer));
   }, []);
 
   async function save(platform: Platform) {
@@ -66,21 +79,26 @@ export function SettingsPage({ apiBase, theme, onApiBaseChange, onThemeChange }:
           setStates(nextStates);
           if (sessionState.status === "failed" || sessionState.status === "expired") {
             window.clearInterval(timer);
+            delete timers.current[platform];
             setLoggingIn(null);
             setMessage((current) => ({ ...current, [platform]: "登录窗口已结束，请重新登录。" }));
             return;
           }
           if (nextStates[platform]?.status === "saved" && nextStates[platform]?.updated_at !== before) {
             window.clearInterval(timer);
+            delete timers.current[platform];
             setLoggingIn(null);
+            setLoginSessions((current) => ({ ...current, [platform]: undefined }));
             setMessage((current) => ({ ...current, [platform]: "登录状态已保存。" }));
           }
         } catch {
           // Keep polling while the separate browser login process is open.
         }
       }, 2000);
+      timers.current[platform] = timer;
       window.setTimeout(() => {
         window.clearInterval(timer);
+        delete timers.current[platform];
         setLoggingIn((current) => current === platform ? null : current);
       }, 300000);
     } catch (error) {
@@ -161,7 +179,12 @@ export function SettingsPage({ apiBase, theme, onApiBaseChange, onThemeChange }:
             const state = states[platform.id];
             const isSaved = state?.status === "saved";
             return (
-              <section className="auth-platform" key={platform.id}>
+              <section
+                className={focusedPlatform === platform.id ? "auth-platform focused" : "auth-platform"}
+                id={`auth-${platform.id}`}
+                key={platform.id}
+                ref={(node) => { platformRefs.current[platform.id] = node; }}
+              >
                 <div className="auth-platform-head">
                   <div><h3>{platform.name}</h3><p>{platform.hint}</p></div>
                   <span className={`status ${isSaved ? "status-success" : "status-unknown"}`}>

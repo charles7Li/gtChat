@@ -15,11 +15,15 @@ function category(name: string): Step {
 export function RunTimeline({ status, stages = [] }: { status: RunStatus; stages?: Array<{ name: string; status: string }> }) {
   const active = new Set(stages.filter((stage) => stage.status === "running" || stage.status === "success" || stage.status === "warning").map((stage) => category(stage.name)));
   const activeIndex = steps.findIndex((step) => active.has(step));
-  const current = status === "pending" || status === "queued" ? 0 : status === "running" ? Math.max(1, activeIndex) : steps.length - 1;
+  const current = status === "pending" || status === "queued"
+    ? 0
+    : status === "running" || status === "cancelling"
+      ? Math.max(1, activeIndex)
+      : steps.length - 1;
   return (
     <ol className="timeline" aria-label="任务进度">
       {steps.map((step, index) => {
-        const className = status === "failed" && index === current ? "failed" : index <= current ? "current" : "";
+        const className = ["failed", "cancelled"].includes(status) && index === current ? "failed" : index <= current ? "current" : "";
         return (
           <li key={step} className={className}>
             <span aria-hidden="true" />
