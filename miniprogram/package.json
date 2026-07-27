@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "build:weapp": "taro build --type weapp",
+    "build:release": "node scripts/release-preflight.mjs && taro build --type weapp",
+    "configure:wechat": "node scripts/configure-project.mjs",
     "dev:weapp": "taro build --type weapp --watch",
     "typecheck": "tsc --noEmit"
   },

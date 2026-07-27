@@ -4,7 +4,7 @@
   "description": "Mochi Scout 微信小程序",
   "appid": "touristappid",
   "setting": {
-    "urlCheck": false,
+    "urlCheck": true,
     "es6": true,
     "enhance": true,
     "postcss": true,
@@ -12,4 +12,3 @@
   },
   "compileType": "miniprogram"
 }
-

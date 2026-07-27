@@ -96,16 +96,21 @@ export const api = {
     const asset = await request<UploadAsset & {
       upload_url: string;
       upload_headers?: Record<string, string>;
+      upload_fields?: Record<string, string>;
       direct_upload?: boolean;
     }>("/api/v1/mobile/uploads/init", {
       method: "POST",
       data: { filename: file.name, content_type: file.type || contentType(file.name), size: file.size }
     });
-    const data = await readBinary(file.path);
-    await uploadBinary(asset.upload_url, data, {
-      "content-type": file.type || contentType(file.name),
-      ...(asset.upload_headers || {})
-    }, Boolean(asset.direct_upload));
+    if (asset.direct_upload && asset.upload_fields && Object.keys(asset.upload_fields).length) {
+      await uploadMultipart(asset.upload_url, file.path, asset.upload_fields);
+    } else {
+      const data = await readBinary(file.path);
+      await uploadBinary(asset.upload_url, data, {
+        "content-type": file.type || contentType(file.name),
+        ...(asset.upload_headers || {})
+      }, Boolean(asset.direct_upload));
+    }
     return request<UploadAsset>(`/api/v1/mobile/uploads/${asset.id}/complete`, { method: "POST" });
   },
   async listJobs() {
@@ -145,11 +150,26 @@ export const api = {
       data: { granted, version: "v1" }
     });
   },
+  async saveLegalConsent(granted: boolean, version: string) {
+    await ensureSession();
+    return request<{ granted: boolean; version: string }>("/api/v1/mobile/consents/legal", {
+      method: "POST",
+      data: { granted, version }
+    });
+  },
   async deleteAccount() {
     await ensureSession();
     await request<void>("/api/v1/mobile/me", { method: "DELETE" });
     Taro.removeStorageSync(ACCESS_KEY);
     Taro.removeStorageSync(REFRESH_KEY);
+  },
+  async deleteData() {
+    await ensureSession();
+    return request<void>("/api/v1/mobile/me/data", { method: "DELETE" });
+  },
+  async exportData() {
+    await ensureSession();
+    return request<Record<string, unknown>>("/api/v1/mobile/me/export");
   },
   clearSession() {
     Taro.removeStorageSync(ACCESS_KEY);
@@ -184,6 +204,13 @@ async function uploadBinary(
       ...headers
     }
   });
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new ApiError(`UPLOAD_${response.statusCode}`, "文件上传失败", true);
+  }
+}
+
+async function uploadMultipart(url: string, filePath: string, formData: Record<string, string>): Promise<void> {
+  const response = await Taro.uploadFile({ url, filePath, name: "file", formData });
   if (response.statusCode < 200 || response.statusCode >= 300) {
     throw new ApiError(`UPLOAD_${response.statusCode}`, "文件上传失败", true);
   }

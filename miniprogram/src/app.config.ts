@@ -6,7 +6,8 @@ export default defineAppConfig({
     "pages/job-detail/index",
     "pages/reports/index",
     "pages/report-detail/index",
-    "pages/profile/index"
+    "pages/profile/index",
+    "pages/legal/index"
   ],
   window: {
     backgroundTextStyle: "light",
@@ -16,4 +17,3 @@ export default defineAppConfig({
     backgroundColor: "#f6f2ea"
   }
 });
-

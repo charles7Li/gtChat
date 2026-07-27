@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import Taro, { useRouter } from "@tarojs/taro";
+import { useEffect, useRef, useState } from "react";
+import Taro, { useDidHide, useDidShow, useRouter } from "@tarojs/taro";
 import { Button, Text, View } from "@tarojs/components";
 import { api } from "../../api";
 import { JobProgress, JobStatusBadge } from "../../components/JobStatus";
@@ -11,24 +11,46 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<MobileJob | null>(null);
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
+  const [resumeToken, setResumeToken] = useState(0);
+  const visibleRef = useRef(true);
+  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+
+  useDidHide(() => {
+    visibleRef.current = false;
+    if (timerRef.current) clearTimeout(timerRef.current);
+  });
+
+  useDidShow(() => {
+    visibleRef.current = true;
+    setResumeToken((value) => value + 1);
+  });
 
   useEffect(() => {
     let active = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    function schedule(delay: number) {
+      if (active && visibleRef.current) timerRef.current = setTimeout(load, delay);
+    }
     async function load() {
+      if (!visibleRef.current) return;
       try {
         const next = await api.getJob(jobId);
         if (!active) return;
         setJob(next);
         setError("");
-        if (["queued", "running"].includes(next.status)) timer = setTimeout(load, 3000);
+        if (["queued", "running"].includes(next.status)) schedule(3000);
       } catch (reason) {
-        if (active) setError(reason instanceof Error ? reason.message : "任务加载失败");
+        if (active) {
+          setError(reason instanceof Error ? reason.message : "任务加载失败");
+          schedule(5000);
+        }
       }
     }
     if (jobId) void load();
-    return () => { active = false; if (timer) clearTimeout(timer); };
-  }, [jobId]);
+    return () => {
+      active = false;
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, [jobId, resumeToken]);
 
   async function cancel() {
     setWorking(true);
@@ -68,6 +90,5 @@ export default function JobDetailPage() {
 }
 
 function routeLabel(route: string) {
-  return ({ trend_report_path: "趋势分析", imitation_plan_path: "拍摄方案", hotspot_auto_analysis_path: "热点判断" } as Record<string, string>)[route] || "分析任务";
+  return ({ trend_report_path: "趋势分析", imitation_plan_path: "拍摄方案", reference_video_imitation_path: "参考视频分析", hotspot_auto_analysis_path: "热点判断" } as Record<string, string>)[route] || "分析任务";
 }
-

@@ -32,7 +32,7 @@ export type UploadAsset = {
   id: string;
   filename: string;
   file_type: "video" | "image" | "csv" | "json";
-  status: "pending" | "uploaded";
+  status: "pending" | "uploaded" | "rejected";
 };
 
 export type ApiErrorPayload = {
